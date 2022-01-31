@@ -5,7 +5,7 @@ use crate::interface::{
     KafkaTopicRepo, Namespace, NamespaceId, NamespaceRepo, ParquetFile, ParquetFileId,
     ParquetFileRepo, Partition, PartitionId, PartitionRepo, QueryPool, QueryPoolId, QueryPoolRepo,
     Result, SequenceNumber, Sequencer, SequencerId, SequencerRepo, Table, TableId, TableRepo,
-    Timestamp, Tombstone, TombstoneRepo,
+    Timestamp, Tombstone, TombstoneRepo, TombstoneId, ProcessedTombstone, ProcessedTombstoneRepo,
 };
 use async_trait::async_trait;
 use observability_deps::tracing::info;
@@ -107,6 +107,10 @@ impl Catalog for PostgresCatalog {
     }
 
     fn parquet_files(&self) -> &dyn ParquetFileRepo {
+        self
+    }
+
+    fn processed_tombstones(&self) -> &dyn ProcessedTombstoneRepo {
         self
     }
 }
@@ -559,6 +563,42 @@ RETURNING *
             .map_err(|e| Error::SqlxError { source: e })
     }
 }
+
+#[async_trait]
+impl ProcessedTombstoneRepo for PostgresCatalog {
+    async fn create(
+        &self,
+        tombstone_id: TombstoneId,
+        parquet_file_id: ParquetFileId,
+    ) -> Result<ProcessedTombstone> {
+        let rec = sqlx::query_as::<_, ProcessedTombstone>(
+            r#"
+INSERT INTO processed_tombstone ( tombstone_id, parquet_file_id )
+VALUES ( $1, $2 )
+RETURNING *
+        "#,
+        )
+            .bind(tombstone_id) // $1
+            .bind(parquet_file_id) // $2
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    Error::ProcessTombstoneExists {
+                        tombstone_id: tombstone_id.get(),
+                        parquet_file_id: parquet_file_id.get(),
+                    }
+                } else if is_fk_violation(&e) {
+                    Error::ForeignKeyViolation { source: e }
+                } else {
+                    Error::SqlxError { source: e }
+                }
+            })?;
+
+        Ok(rec)
+    }
+}
+
 
 /// The error code returned by Postgres for a unique constraint violation.
 ///

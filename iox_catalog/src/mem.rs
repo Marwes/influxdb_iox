@@ -6,7 +6,7 @@ use crate::interface::{
     KafkaTopicId, KafkaTopicRepo, Namespace, NamespaceId, NamespaceRepo, ParquetFile,
     ParquetFileId, ParquetFileRepo, Partition, PartitionId, PartitionRepo, QueryPool, QueryPoolId,
     QueryPoolRepo, Result, SequenceNumber, Sequencer, SequencerId, SequencerRepo, Table, TableId,
-    TableRepo, Timestamp, Tombstone, TombstoneId, TombstoneRepo,
+    TableRepo, Timestamp, Tombstone, TombstoneId, TombstoneRepo, ProcessedTombstone, ProcessedTombstoneRepo,
 };
 use async_trait::async_trait;
 use std::convert::TryFrom;
@@ -46,6 +46,7 @@ struct MemCollections {
     partitions: Vec<Partition>,
     tombstones: Vec<Tombstone>,
     parquet_files: Vec<ParquetFile>,
+    processed_tombstones: Vec<ProcessedTombstone>,
 }
 
 #[async_trait]
@@ -88,6 +89,10 @@ impl Catalog for MemCatalog {
     }
 
     fn parquet_files(&self) -> &dyn ParquetFileRepo {
+        self
+    }
+
+    fn processed_tombstones(&self) -> &dyn ProcessedTombstoneRepo {
         self
     }
 }
@@ -498,6 +503,34 @@ impl ParquetFileRepo for MemCatalog {
         Ok(files)
     }
 }
+
+#[async_trait]
+impl ProcessedTombstoneRepo for MemCatalog {
+    async fn create(
+        &self,
+        tombstone_id: TombstoneId,
+        parquet_file_id: ParquetFileId,
+    ) -> Result<ProcessedTombstone> {
+
+        let mut collections = self.collections.lock().expect("mutex poisoned");
+        if collections
+            .processed_tombstones
+            .iter()
+            .any(|pt| pt.tombstone_id == tombstone_id && pt.parquet_file_id == parquet_file_id)
+        {
+            return Err(Error::ProcessTombstoneExists { tombstone_id: tombstone_id.get(), parquet_file_id: parquet_file_id.get() });
+        }
+
+        let processed_tombstone = ProcessedTombstone{
+            tombstone_id,
+            parquet_file_id,
+        };
+
+        collections.processed_tombstones.push(processed_tombstone);
+        Ok(*collections.processed_tombstones.last().unwrap())
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

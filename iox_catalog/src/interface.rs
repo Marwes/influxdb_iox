@@ -49,6 +49,12 @@ pub enum Error {
         source: Box<dyn std::error::Error + Send>,
         name: String,
     },
+
+    #[snafu(display("the tombstone {} already processed for parquet file {}", tombstone_id, parquet_file_id))]
+    ProcessTombstoneExists {
+        tombstone_id: i64,
+        parquet_file_id: i64,
+    }
 }
 
 /// A specialized `Error` for Catalog errors
@@ -285,6 +291,9 @@ pub trait Catalog: Send + Sync + Debug {
 
     /// repo for parquet_files
     fn parquet_files(&self) -> &dyn ParquetFileRepo;
+
+    /// repo for processed_tombstones
+    fn processed_tombstones(&self) -> &dyn ProcessedTombstoneRepo;
 }
 
 /// Functions for working with Kafka topics in the catalog.
@@ -443,6 +452,17 @@ pub trait ParquetFileRepo: Send + Sync {
     ) -> Result<Vec<ParquetFile>>;
 }
 
+/// Functions for working with processed tombstone pointers in the catalog
+#[async_trait]
+pub trait ProcessedTombstoneRepo: Send + Sync {
+    /// create the processed tombstone
+    #[allow(clippy::too_many_arguments)]
+    async fn create(
+        &self,
+        tombstone_id: TombstoneId,
+        parquet_file_id: ParquetFileId,
+    ) -> Result<ProcessedTombstone>;
+}
 /// Data object for a kafka topic
 #[derive(Debug, Clone, Eq, PartialEq, sqlx::FromRow)]
 pub struct KafkaTopic {
@@ -555,6 +575,11 @@ pub async fn get_schema_by_name(
     }
 
     Ok(Some(namespace))
+}
+
+/// Insert the conpacted parquet file and its tombstones into the catalog
+pub async fn add_parquet_file_with_tombstones(metadata: &IoxMetadata, tombstones: &[Tombstone])  {
+
 }
 
 /// Data object for a table
@@ -841,6 +866,15 @@ pub struct ParquetFile {
     pub max_time: Timestamp,
     /// flag to mark that this file should be deleted from object storage
     pub to_delete: bool,
+}
+
+/// Data for a processed tombstone reference in the catalog.
+#[derive(Debug, Copy, Clone, PartialEq, sqlx::FromRow)]
+pub struct ProcessedTombstone {
+    /// the id of the tombstone applied to the parquet file
+    pub tombstone_id: TombstoneId,
+    /// the id of the parquet file the tombstone was applied
+    pub parquet_file_id: ParquetFileId,
 }
 
 #[cfg(test)]
