@@ -3,9 +3,10 @@
 use crate::interface::{
     Catalog, Column, ColumnRepo, ColumnType, Error, KafkaPartition, KafkaTopic, KafkaTopicId,
     KafkaTopicRepo, Namespace, NamespaceId, NamespaceRepo, ParquetFile, ParquetFileId,
-    ParquetFileRepo, Partition, PartitionId, PartitionRepo, QueryPool, QueryPoolId, QueryPoolRepo,
-    Result, SequenceNumber, Sequencer, SequencerId, SequencerRepo, Table, TableId, TableRepo,
-    Timestamp, Tombstone, TombstoneRepo, TombstoneId, ProcessedTombstone, ProcessedTombstoneRepo,
+    ParquetFileRepo, Partition, PartitionId, PartitionRepo, ProcessedTombstone,
+    ProcessedTombstoneRepo, QueryPool, QueryPoolId, QueryPoolRepo, Result, SequenceNumber,
+    Sequencer, SequencerId, SequencerRepo, Table, TableId, TableRepo, Timestamp, Tombstone,
+    TombstoneId, TombstoneRepo,
 };
 use async_trait::async_trait;
 use observability_deps::tracing::info;
@@ -578,27 +579,46 @@ VALUES ( $1, $2 )
 RETURNING *
         "#,
         )
-            .bind(tombstone_id) // $1
-            .bind(parquet_file_id) // $2
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| {
-                if is_unique_violation(&e) {
-                    Error::ProcessTombstoneExists {
-                        tombstone_id: tombstone_id.get(),
-                        parquet_file_id: parquet_file_id.get(),
-                    }
-                } else if is_fk_violation(&e) {
-                    Error::ForeignKeyViolation { source: e }
-                } else {
-                    Error::SqlxError { source: e }
+        .bind(tombstone_id) // $1
+        .bind(parquet_file_id) // $2
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                Error::ProcessTombstoneExists {
+                    tombstone_id: tombstone_id.get(),
+                    parquet_file_id: parquet_file_id.get(),
                 }
-            })?;
+            } else if is_fk_violation(&e) {
+                Error::ForeignKeyViolation { source: e }
+            } else {
+                Error::SqlxError { source: e }
+            }
+        })?;
 
         Ok(rec)
     }
-}
 
+    async fn create_many(
+        &self,
+        parquet_file_id: ParquetFileId,
+        tombstones: &[Tombstone],
+    ) -> Result<Vec<ProcessedTombstone>> {
+        let processed_tombstone_repo = self.processed_tombstones();
+        let mut processed_tombstones = vec![];
+        for tombstone in tombstones {
+            // todo: make this function a part of the transaction defined in add_parquet_file_with_tombstones
+            let processed_tombstone = processed_tombstone_repo
+                .create(tombstone.id, parquet_file_id)
+                .await;
+            if let Ok(processed_tombstone) = processed_tombstone {
+                processed_tombstones.push(processed_tombstone);
+            }
+        }
+
+        Ok(processed_tombstones)
+    }
+}
 
 /// The error code returned by Postgres for a unique constraint violation.
 ///

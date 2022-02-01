@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use iox_catalog::interface::Tombstone;
+use iox_catalog::interface::{ParquetFile, ParquetFileId, Tombstone};
 use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
 

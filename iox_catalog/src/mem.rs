@@ -4,9 +4,10 @@
 use crate::interface::{
     Catalog, Column, ColumnId, ColumnRepo, ColumnType, Error, KafkaPartition, KafkaTopic,
     KafkaTopicId, KafkaTopicRepo, Namespace, NamespaceId, NamespaceRepo, ParquetFile,
-    ParquetFileId, ParquetFileRepo, Partition, PartitionId, PartitionRepo, QueryPool, QueryPoolId,
-    QueryPoolRepo, Result, SequenceNumber, Sequencer, SequencerId, SequencerRepo, Table, TableId,
-    TableRepo, Timestamp, Tombstone, TombstoneId, TombstoneRepo, ProcessedTombstone, ProcessedTombstoneRepo,
+    ParquetFileId, ParquetFileRepo, Partition, PartitionId, PartitionRepo, ProcessedTombstone,
+    ProcessedTombstoneRepo, QueryPool, QueryPoolId, QueryPoolRepo, Result, SequenceNumber,
+    Sequencer, SequencerId, SequencerRepo, Table, TableId, TableRepo, Timestamp, Tombstone,
+    TombstoneId, TombstoneRepo,
 };
 use async_trait::async_trait;
 use std::convert::TryFrom;
@@ -511,17 +512,19 @@ impl ProcessedTombstoneRepo for MemCatalog {
         tombstone_id: TombstoneId,
         parquet_file_id: ParquetFileId,
     ) -> Result<ProcessedTombstone> {
-
         let mut collections = self.collections.lock().expect("mutex poisoned");
         if collections
             .processed_tombstones
             .iter()
             .any(|pt| pt.tombstone_id == tombstone_id && pt.parquet_file_id == parquet_file_id)
         {
-            return Err(Error::ProcessTombstoneExists { tombstone_id: tombstone_id.get(), parquet_file_id: parquet_file_id.get() });
+            return Err(Error::ProcessTombstoneExists {
+                tombstone_id: tombstone_id.get(),
+                parquet_file_id: parquet_file_id.get(),
+            });
         }
 
-        let processed_tombstone = ProcessedTombstone{
+        let processed_tombstone = ProcessedTombstone {
             tombstone_id,
             parquet_file_id,
         };
@@ -529,8 +532,26 @@ impl ProcessedTombstoneRepo for MemCatalog {
         collections.processed_tombstones.push(processed_tombstone);
         Ok(*collections.processed_tombstones.last().unwrap())
     }
-}
 
+    async fn create_many(
+        &self,
+        parquet_file_id: ParquetFileId,
+        tombstones: &[Tombstone],
+    ) -> Result<Vec<ProcessedTombstone>> {
+        let repo = self.processed_tombstones();
+
+        // todo: make this function a part of the transaction defined in add_parquet_file_with_tombstones
+        let mut processed_tombstones = vec![];
+        for tombstone in tombstones {
+            let processed_tombstone = repo.create(tombstone.id, parquet_file_id).await;
+            if let Ok(processed_tombstone) = processed_tombstone {
+                processed_tombstones.push(processed_tombstone);
+            }
+        }
+
+        Ok(processed_tombstones)
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -50,11 +50,15 @@ pub enum Error {
         name: String,
     },
 
-    #[snafu(display("the tombstone {} already processed for parquet file {}", tombstone_id, parquet_file_id))]
+    #[snafu(display(
+        "the tombstone {} already processed for parquet file {}",
+        tombstone_id,
+        parquet_file_id
+    ))]
     ProcessTombstoneExists {
         tombstone_id: i64,
         parquet_file_id: i64,
-    }
+    },
 }
 
 /// A specialized `Error` for Catalog errors
@@ -456,12 +460,18 @@ pub trait ParquetFileRepo: Send + Sync {
 #[async_trait]
 pub trait ProcessedTombstoneRepo: Send + Sync {
     /// create the processed tombstone
-    #[allow(clippy::too_many_arguments)]
     async fn create(
         &self,
         tombstone_id: TombstoneId,
         parquet_file_id: ParquetFileId,
     ) -> Result<ProcessedTombstone>;
+
+    /// create processed tombstones
+    async fn create_many(
+        &self,
+        parquet_file_id: ParquetFileId,
+        tombstones: &[Tombstone],
+    ) -> Result<Vec<ProcessedTombstone>>;
 }
 /// Data object for a kafka topic
 #[derive(Debug, Clone, Eq, PartialEq, sqlx::FromRow)]
@@ -578,8 +588,36 @@ pub async fn get_schema_by_name(
 }
 
 /// Insert the conpacted parquet file and its tombstones into the catalog
-pub async fn add_parquet_file_with_tombstones(metadata: &IoxMetadata, tombstones: &[Tombstone])  {
+pub async fn add_parquet_file_with_tombstones(
+    catalog: &dyn Catalog,
+    parquet_file: &ParquetFile,
+    tombstones: &[Tombstone],
+) -> Result<(Option<ParquetFile>, Option<Vec<ProcessedTombstone>>)> {
+    // todo: this is not transactional yet and may cause many issues if one insert fails.
+    // Will read sqlx doc to see how to add a start and end (commit or rollback) a stransaction
 
+    // create a parquet file in the catalog first
+    let parquet = catalog
+        .parquet_files()
+        .create(
+            parquet_file.sequencer_id,
+            parquet_file.table_id,
+            parquet_file.partition_id,
+            parquet_file.object_store_id,
+            parquet_file.min_sequence_number,
+            parquet_file.max_sequence_number,
+            parquet_file.min_time,
+            parquet_file.max_time,
+        )
+        .await?;
+
+    // Now the parquet available, let create its processed tombstones
+    let processed_tombstones = catalog
+        .processed_tombstones()
+        .create_many(parquet.id, tombstones)
+        .await?;
+
+    Ok((Some(parquet), Some(processed_tombstones)))
 }
 
 /// Data object for a table
