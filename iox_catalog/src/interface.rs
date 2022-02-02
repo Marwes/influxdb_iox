@@ -79,6 +79,12 @@ impl NamespaceId {
     }
 }
 
+impl std::fmt::Display for NamespaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Unique ID for a `KafkaTopic`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, sqlx::Type)]
 #[sqlx(transparent)]
@@ -130,6 +136,12 @@ impl TableId {
     }
 }
 
+impl std::fmt::Display for TableId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Unique ID for a `Column`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, sqlx::Type)]
 #[sqlx(transparent)]
@@ -157,6 +169,12 @@ impl SequencerId {
     }
     pub fn get(&self) -> i16 {
         self.0
+    }
+}
+
+impl std::fmt::Display for SequencerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -193,6 +211,12 @@ impl PartitionId {
     }
     pub fn get(&self) -> i64 {
         self.0
+    }
+}
+
+impl std::fmt::Display for PartitionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

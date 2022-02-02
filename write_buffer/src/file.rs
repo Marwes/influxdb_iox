@@ -251,6 +251,10 @@ impl WriteBufferWriting for FileBufferProducer {
         ))
     }
 
+    async fn flush(&self) {
+        // no buffer
+    }
+
     fn type_name(&self) -> &'static str {
         "file"
     }
@@ -699,6 +703,7 @@ mod tests {
                 database_name: format!("test_db_{}", Uuid::new_v4()),
                 n_sequencers,
                 time_provider,
+                trace_collector: Arc::new(RingBufferTraceCollector::new(100)),
             }
         }
     }
@@ -708,6 +713,7 @@ mod tests {
         database_name: String,
         n_sequencers: NonZeroU32,
         time_provider: Arc<dyn TimeProvider>,
+        trace_collector: Arc<RingBufferTraceCollector>,
     }
 
     impl FileTestContext {
@@ -735,16 +741,17 @@ mod tests {
         }
 
         async fn reading(&self, creation_config: bool) -> Result<Self::Reading, WriteBufferError> {
-            let trace_collector: Arc<dyn TraceCollector> =
-                Arc::new(RingBufferTraceCollector::new(5));
-
             FileBufferConsumer::new(
                 &self.path,
                 &self.database_name,
                 self.creation_config(creation_config).as_ref(),
-                Some(&trace_collector),
+                Some(&(self.trace_collector() as Arc<_>)),
             )
             .await
+        }
+
+        fn trace_collector(&self) -> Arc<RingBufferTraceCollector> {
+            Arc::clone(&self.trace_collector)
         }
     }
 

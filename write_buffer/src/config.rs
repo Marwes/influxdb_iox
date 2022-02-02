@@ -87,6 +87,7 @@ impl WriteBufferConfigFactory {
     pub async fn new_config_write(
         &self,
         db_name: &str,
+        trace_collector: Option<&Arc<dyn TraceCollector>>,
         cfg: &WriteBufferConnection,
     ) -> Result<Arc<dyn WriteBufferWriting>, WriteBufferError> {
         let writer = match &cfg.type_[..] {
@@ -120,8 +121,10 @@ impl WriteBufferConfigFactory {
                 let rskafa_buffer = RSKafkaProducer::new(
                     cfg.connection.clone(),
                     db_name.to_owned(),
+                    &cfg.connection_config,
                     cfg.creation_config.as_ref(),
                     Arc::clone(&self.time_provider),
+                    trace_collector.map(Arc::clone),
                 )
                 .await?;
                 Arc::new(rskafa_buffer) as _
@@ -205,6 +208,7 @@ impl WriteBufferConfigFactory {
                 let rskafka_buffer = RSKafkaConsumer::new(
                     cfg.connection.clone(),
                     db_name.to_owned(),
+                    &cfg.connection_config,
                     cfg.creation_config.as_ref(),
                     trace_collector.map(Arc::clone),
                 )
@@ -281,7 +285,7 @@ mod tests {
         };
 
         let conn = factory
-            .new_config_write(db_name.as_str(), &cfg)
+            .new_config_write(db_name.as_str(), None, &cfg)
             .await
             .unwrap();
         assert_eq!(conn.type_name(), "file");
@@ -324,7 +328,7 @@ mod tests {
         };
 
         let conn = factory
-            .new_config_write(db_name.as_str(), &cfg)
+            .new_config_write(db_name.as_str(), None, &cfg)
             .await
             .unwrap();
         assert_eq!(conn.type_name(), "mock");
@@ -336,7 +340,7 @@ mod tests {
             ..Default::default()
         };
         let err = factory
-            .new_config_write(db_name.as_str(), &cfg)
+            .new_config_write(db_name.as_str(), None, &cfg)
             .await
             .unwrap_err();
         assert!(err.to_string().starts_with("Unknown mock ID:"));
@@ -393,7 +397,7 @@ mod tests {
         };
 
         let conn = factory
-            .new_config_write(db_name.as_str(), &cfg)
+            .new_config_write(db_name.as_str(), None, &cfg)
             .await
             .unwrap();
         assert_eq!(conn.type_name(), "mock_failing");
@@ -405,7 +409,7 @@ mod tests {
             ..Default::default()
         };
         let err = factory
-            .new_config_write(db_name.as_str(), &cfg)
+            .new_config_write(db_name.as_str(), None, &cfg)
             .await
             .unwrap_err();
         assert!(err.to_string().starts_with("Unknown mock ID:"));
@@ -477,7 +481,7 @@ mod tests {
         };
 
         let conn = factory
-            .new_config_write(db_name.as_str(), &cfg)
+            .new_config_write(db_name.as_str(), None, &cfg)
             .await
             .unwrap();
         assert_eq!(conn.type_name(), "rskafka");
@@ -521,7 +525,7 @@ mod tests {
             };
 
             let conn = factory
-                .new_config_write(db_name.as_str(), &cfg)
+                .new_config_write(db_name.as_str(), None, &cfg)
                 .await
                 .unwrap();
             assert_eq!(conn.type_name(), "kafka");
@@ -564,7 +568,7 @@ mod tests {
             };
 
             let err = factory
-                .new_config_write(db_name.as_str(), &cfg)
+                .new_config_write(db_name.as_str(), None, &cfg)
                 .await
                 .unwrap_err();
             assert_eq!(

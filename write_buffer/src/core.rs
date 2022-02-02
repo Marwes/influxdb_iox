@@ -25,7 +25,12 @@ pub trait WriteBufferWriting: Sync + Send + Debug + 'static {
     ///
     /// The [`dml::DmlMeta`] will be propagated where applicable
     ///
-    /// Returns the metadata that was written
+    /// This call may "async block" (i.e. be in a pending state) to accumulate multiple operations into a single batch.
+    /// After this method returns the operation was actually written (i.e. it is NOT buffered any longer). You may use
+    /// [`flush`](Self::flush) to trigger an early submission (e.g. before some linger time expired), which can be
+    /// helpful for controlled shutdown.
+    ///
+    /// Returns the metadata that was written.
     async fn store_operation(
         &self,
         sequencer_id: u32,
@@ -46,6 +51,13 @@ pub trait WriteBufferWriting: Sync + Send + Debug + 'static {
         )
         .await
     }
+
+    /// Flush all currently blocking store operations ([`store_operation`](Self::store_operation) /
+    /// [`store_lp`](Self::store_lp)).
+    ///
+    /// This call is pending while outstanding data is being submitted and will return AFTER the flush completed.
+    /// However you still need to poll the store operations to get the metadata for every write.
+    async fn flush(&self);
 
     /// Return type (like `"mock"` or `"kafka"`) of this writer.
     fn type_name(&self) -> &'static str;
@@ -102,7 +114,7 @@ pub mod test_utils {
     use super::{WriteBufferError, WriteBufferReading, WriteBufferWriting};
     use async_trait::async_trait;
     use dml::{test_util::assert_write_op_eq, DmlMeta, DmlOperation, DmlWrite};
-    use futures::{StreamExt, TryStreamExt};
+    use futures::{stream::FuturesUnordered, StreamExt, TryStreamExt};
     use std::{
         collections::{BTreeMap, BTreeSet},
         convert::TryFrom,
@@ -111,7 +123,7 @@ pub mod test_utils {
         time::Duration,
     };
     use time::{Time, TimeProvider};
-    use trace::{ctx::SpanContext, RingBufferTraceCollector, TraceCollector};
+    use trace::{ctx::SpanContext, span::Span, RingBufferTraceCollector};
     use uuid::Uuid;
 
     /// Generated random topic name for testing.
@@ -157,6 +169,9 @@ pub mod test_utils {
 
         /// Create new reader.
         async fn reading(&self, creation_config: bool) -> Result<Self::Reading, WriteBufferError>;
+
+        /// Trace collector that is used in this context.
+        fn trace_collector(&self) -> Arc<RingBufferTraceCollector>;
     }
 
     /// Generic test suite that must be passed by all proper write buffer implementations.
@@ -181,6 +196,7 @@ pub mod test_utils {
         test_span_context(&adapter).await;
         test_unknown_sequencer_write(&adapter).await;
         test_multi_namespaces(&adapter).await;
+        test_flush(&adapter).await;
     }
 
     /// Writes line protocol and returns the [`DmlWrite`] that was written
@@ -629,8 +645,8 @@ pub mod test_utils {
         write("namespace", &writer, entry, sequencer_id, None).await;
 
         // 2: some context
-        let collector: Arc<dyn TraceCollector> = Arc::new(RingBufferTraceCollector::new(5));
-        let span_context_1 = SpanContext::new(Arc::clone(&collector));
+        let collector = context.trace_collector();
+        let span_context_1 = SpanContext::new(Arc::clone(&collector) as Arc<_>);
         write(
             "namespace",
             &writer,
@@ -641,7 +657,7 @@ pub mod test_utils {
         .await;
 
         // 2: another context
-        let span_context_parent = SpanContext::new(collector);
+        let span_context_parent = SpanContext::new(Arc::clone(&collector) as Arc<_>);
         let span_context_2 = span_context_parent.child("foo").ctx;
         write(
             "namespace",
@@ -659,12 +675,12 @@ pub mod test_utils {
         // check write 2
         let write_2 = stream.stream.next().await.unwrap().unwrap();
         let actual_context_1 = write_2.meta().span_context().unwrap();
-        assert_span_context_eq(actual_context_1, &span_context_1);
+        assert_span_context_eq_or_linked(&span_context_1, actual_context_1, collector.spans());
 
         // check write 3
         let write_3 = stream.stream.next().await.unwrap().unwrap();
         let actual_context_2 = write_3.meta().span_context().unwrap();
-        assert_span_context_eq(actual_context_2, &span_context_2);
+        assert_span_context_eq_or_linked(&span_context_2, actual_context_2, collector.spans());
     }
 
     /// Test that writing to an unknown sequencer produces an error
@@ -713,6 +729,43 @@ pub mod test_utils {
         let w2 = write("namespace_2", &writer, entry_1, sequencer_id, None).await;
 
         assert_reader_content(&mut reader, &[(sequencer_id, &[&w1, &w2])]).await;
+    }
+
+    /// Dummy test to ensure that flushing somewhat works.
+    async fn test_flush<T>(adapter: &T)
+    where
+        T: TestAdapter,
+    {
+        let context = adapter.new_context(NonZeroU32::try_from(1).unwrap()).await;
+
+        let writer = Arc::new(context.writing(true).await.unwrap());
+
+        let mut sequencer_ids = writer.sequencer_ids();
+        assert_eq!(sequencer_ids.len(), 1);
+        let sequencer_id = set_pop_first(&mut sequencer_ids).unwrap();
+
+        let mut write_tasks: FuturesUnordered<_> = (0..20)
+            .map(|i| {
+                let writer = Arc::clone(&writer);
+
+                async move {
+                    let entry = format!("upc,region=east user={} {}", i, i);
+
+                    write("ns", writer.as_ref(), &entry, sequencer_id, None).await;
+                }
+            })
+            .collect();
+
+        let write_tasks = tokio::spawn(async move { while write_tasks.next().await.is_some() {} });
+
+        tokio::time::sleep(Duration::from_millis(1)).await;
+
+        writer.flush().await;
+
+        tokio::time::timeout(Duration::from_millis(1_000), write_tasks)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// Assert that the content of the reader is as expected.
@@ -770,16 +823,35 @@ pub mod test_utils {
         }
     }
 
-    /// Asserts that given span context are the same.
+    /// Asserts that given span context are the same or that `second` links back to `first`.
     ///
     /// "Same" means:
     /// - identical trace ID
     /// - identical span ID
     /// - identical parent span ID
-    pub(crate) fn assert_span_context_eq(lhs: &SpanContext, rhs: &SpanContext) {
-        assert_eq!(lhs.trace_id, rhs.trace_id);
-        assert_eq!(lhs.span_id, rhs.span_id);
-        assert_eq!(lhs.parent_span_id, rhs.parent_span_id);
+    pub(crate) fn assert_span_context_eq_or_linked(
+        first: &SpanContext,
+        second: &SpanContext,
+        spans: Vec<Span>,
+    ) {
+        // search for links
+        for span in spans {
+            if (span.ctx.trace_id == second.trace_id) && (span.ctx.span_id == second.span_id) {
+                // second context was emitted as span
+
+                // check if it links to first context
+                for (trace_id, span_id) in span.ctx.links {
+                    if (trace_id == first.trace_id) && (span_id == first.span_id) {
+                        return;
+                    }
+                }
+            }
+        }
+
+        // no link found
+        assert_eq!(first.trace_id, second.trace_id);
+        assert_eq!(first.span_id, second.span_id);
+        assert_eq!(first.parent_span_id, second.parent_span_id);
     }
 
     /// Pops first entry from map.
