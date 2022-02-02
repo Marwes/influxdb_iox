@@ -46,8 +46,8 @@ pub fn update_catalog_after_persisting(
     }
 
     // Insert persisted information into Postgres
-    // todo: turn this on when Paul has it implemented
-    // ingester.iox_catalog.add_parquet_file_with_tombstones(metadata, tombstones);
+    let parquet_file = metadata.to_parquet_file();
+    ingester.iox_catalog.add_parquet_file_with_tombstones(&parquet_file, tombstones);
 
     // Remove the batch from its memory
     let mut data_buffer = ingester.data.lock().expect("mutex poisoned");

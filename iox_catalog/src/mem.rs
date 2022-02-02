@@ -5,11 +5,13 @@ use crate::interface::{
     Catalog, Column, ColumnId, ColumnRepo, ColumnType, Error, KafkaPartition, KafkaTopic,
     KafkaTopicId, KafkaTopicRepo, Namespace, NamespaceId, NamespaceRepo, ParquetFile,
     ParquetFileId, ParquetFileRepo, Partition, PartitionId, PartitionRepo, ProcessedTombstone,
-    ProcessedTombstoneRepo, QueryPool, QueryPoolId, QueryPoolRepo, Result, SequenceNumber,
+    QueryPool, QueryPoolId, QueryPoolRepo, Result, SequenceNumber,
     Sequencer, SequencerId, SequencerRepo, Table, TableId, TableRepo, Timestamp, Tombstone,
-    TombstoneId, TombstoneRepo,
+    TombstoneId, TombstoneRepo, ProcessedTombstoneRepo,
 };
 use async_trait::async_trait;
+use observability_deps::tracing::warn;
+use sqlx::{Execute, Postgres, Transaction};
 use std::convert::TryFrom;
 use std::fmt::Formatter;
 use std::sync::Mutex;
@@ -95,6 +97,36 @@ impl Catalog for MemCatalog {
 
     fn processed_tombstones(&self) -> &dyn ProcessedTombstoneRepo {
         self
+    }
+
+    async fn add_parquet_file_with_tombstones(
+        &self, 
+        parquet_file: &ParquetFile,
+        tombstones: &[Tombstone],
+    ) -> Result<(ParquetFile, Vec<ProcessedTombstone>), Error> {
+
+        // create a parquet file in the catalog first
+        let parquet = self
+            .parquet_files()
+            .create(
+                parquet_file.sequencer_id,
+                parquet_file.table_id,
+                parquet_file.partition_id,
+                parquet_file.object_store_id,
+                parquet_file.min_sequence_number,
+                parquet_file.max_sequence_number,
+                parquet_file.min_time,
+                parquet_file.max_time,
+            )
+            .await?;
+
+        // Now the parquet available, let create its processed tombstones
+        let processed_tombstones = self
+            .processed_tombstones()
+            .create_many(&mut None, parquet.id, tombstones)
+            .await?;
+
+        Ok((parquet, vec![])) //processed_tombstones))
     }
 }
 
@@ -478,6 +510,22 @@ impl ParquetFileRepo for MemCatalog {
         Ok(*collections.parquet_files.last().unwrap())
     }
 
+    async fn create_in_transaction(
+        &self,
+        txt: &mut Transaction<'_, Postgres>,
+        sequencer_id: SequencerId,
+        table_id: TableId,
+        partition_id: PartitionId,
+        object_store_id: Uuid,
+        min_sequence_number: SequenceNumber,
+        max_sequence_number: SequenceNumber,
+        min_time: Timestamp,
+        max_time: Timestamp,
+    ) -> Result<ParquetFile> {
+        unimplemented!()
+    }
+
+        
     async fn flag_for_delete(&self, id: ParquetFileId) -> Result<()> {
         let mut collections = self.collections.lock().expect("mutex poisoned");
 
@@ -507,46 +555,33 @@ impl ParquetFileRepo for MemCatalog {
 
 #[async_trait]
 impl ProcessedTombstoneRepo for MemCatalog {
-    async fn create(
-        &self,
-        tombstone_id: TombstoneId,
-        parquet_file_id: ParquetFileId,
-    ) -> Result<ProcessedTombstone> {
-        let mut collections = self.collections.lock().expect("mutex poisoned");
-        if collections
-            .processed_tombstones
-            .iter()
-            .any(|pt| pt.tombstone_id == tombstone_id && pt.parquet_file_id == parquet_file_id)
-        {
-            return Err(Error::ProcessTombstoneExists {
-                tombstone_id: tombstone_id.get(),
-                parquet_file_id: parquet_file_id.get(),
-            });
-        }
-
-        let processed_tombstone = ProcessedTombstone {
-            tombstone_id,
-            parquet_file_id,
-        };
-
-        collections.processed_tombstones.push(processed_tombstone);
-        Ok(*collections.processed_tombstones.last().unwrap())
-    }
-
     async fn create_many(
         &self,
+        _txt: &mut Option<Transaction<'_, Postgres>>,
         parquet_file_id: ParquetFileId,
         tombstones: &[Tombstone],
     ) -> Result<Vec<ProcessedTombstone>> {
-        let repo = self.processed_tombstones();
+        let mut collections = self.collections.lock().expect("mutex poisoned");
 
-        // todo: make this function a part of the transaction defined in add_parquet_file_with_tombstones
         let mut processed_tombstones = vec![];
         for tombstone in tombstones {
-            let processed_tombstone = repo.create(tombstone.id, parquet_file_id).await;
-            if let Ok(processed_tombstone) = processed_tombstone {
-                processed_tombstones.push(processed_tombstone);
-            }
+
+            if collections
+                .processed_tombstones
+                .iter()
+                .any(|pt| pt.tombstone_id == tombstone.id && pt.parquet_file_id == parquet_file_id)
+                {
+                    // The tombstone was already proccessed for this file
+                    warn!(tombstone_id=tombstone.id.get(), parquet_file_id=parquet_file_id.get(), "The processed tombstone already exists");
+                    continue;
+                }
+
+            let processed_tombstone = ProcessedTombstone {
+                tombstone_id: tombstone.id,
+                parquet_file_id,
+            };
+
+            collections.processed_tombstones.push(processed_tombstone);
         }
 
         Ok(processed_tombstones)

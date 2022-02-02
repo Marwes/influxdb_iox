@@ -4,13 +4,13 @@ use crate::interface::{
     Catalog, Column, ColumnRepo, ColumnType, Error, KafkaPartition, KafkaTopic, KafkaTopicId,
     KafkaTopicRepo, Namespace, NamespaceId, NamespaceRepo, ParquetFile, ParquetFileId,
     ParquetFileRepo, Partition, PartitionId, PartitionRepo, ProcessedTombstone,
-    ProcessedTombstoneRepo, QueryPool, QueryPoolId, QueryPoolRepo, Result, SequenceNumber,
+   QueryPool, QueryPoolId, QueryPoolRepo, Result, SequenceNumber,
     Sequencer, SequencerId, SequencerRepo, Table, TableId, TableRepo, Timestamp, Tombstone,
-    TombstoneId, TombstoneRepo,
+    TombstoneRepo, ProcessedTombstoneRepo,
 };
 use async_trait::async_trait;
-use observability_deps::tracing::info;
-use sqlx::{migrate::Migrator, postgres::PgPoolOptions, Executor, Pool, Postgres};
+use observability_deps::tracing::{info, warn};
+use sqlx::{migrate::Migrator, postgres::PgPoolOptions, Executor, Pool, Postgres, Transaction};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -113,6 +113,66 @@ impl Catalog for PostgresCatalog {
 
     fn processed_tombstones(&self) -> &dyn ProcessedTombstoneRepo {
         self
+    }
+
+    async fn add_parquet_file_with_tombstones(
+        &self,
+        parquet_file: &ParquetFile,
+        tombstones: &[Tombstone],
+    ) -> Result<(ParquetFile, Vec<ProcessedTombstone>), Error> {
+        
+        // Start a transaction
+        let txt = self.pool.begin().await;
+        if txt.is_err() {
+            return Err(Error::StartTransaction{source: txt.unwrap_err()});
+        }
+        let mut txt = txt.unwrap();
+        
+        // create a parquet file in the catalog first
+        let parquet = self
+            .parquet_files()
+            .create_in_transaction(
+                &mut txt,
+                parquet_file.sequencer_id,
+                parquet_file.table_id,
+                parquet_file.partition_id,
+                parquet_file.object_store_id,
+                parquet_file.min_sequence_number,
+                parquet_file.max_sequence_number,
+                parquet_file.min_time,
+                parquet_file.max_time,
+            )
+            .await;
+        
+        if parquet.is_err() {
+            // Error while adding parquet file into the catalog, stop the transaction
+            let error = parquet.unwrap_err();
+            warn!(object_store_id=?parquet_file.object_store_id.to_string(), "{}", error.to_string());
+            let _rollback = txt.rollback().await;
+            return Err(error);
+        }
+        let parquet = parquet.unwrap();
+
+        // Now the parquet available, create its processed tombstones
+        let processed_tombstones = self
+            .processed_tombstones()
+            .create_many(&mut Some(txt), parquet.id.clone(), tombstones)
+            .await;
+
+        let processed_tombstones =  match processed_tombstones {
+            Ok(processed_tombstones) => processed_tombstones,
+            Err(e) => {
+                // The create_many function only returns error when the txt does not provide to it 
+                // which should not happen here. Just show the error
+                warn!("{}", e.to_string());
+                vec![]
+            }
+        };
+
+        // Commit the transaction
+        let _commit = txt.commit().await;
+
+        Ok((parquet, processed_tombstones))
     }
 }
 
@@ -508,7 +568,8 @@ impl ParquetFileRepo for PostgresCatalog {
         max_sequence_number: SequenceNumber,
         min_time: Timestamp,
         max_time: Timestamp,
-    ) -> Result<ParquetFile> {
+    ) -> Result<ParquetFile> 
+    {
         let rec = sqlx::query_as::<_, ParquetFile>(
             r#"
 INSERT INTO parquet_file ( sequencer_id, table_id, partition_id, object_store_id, min_sequence_number, max_sequence_number, min_time, max_time, to_delete )
@@ -525,6 +586,51 @@ RETURNING *
             .bind(min_time) // $7
             .bind(max_time) // $8
             .fetch_one(&self.pool)
+            .await
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    Error::FileExists {
+                        object_store_id,
+                    }
+                } else if is_fk_violation(&e) {
+                    Error::ForeignKeyViolation { source: e }
+                } else {
+                    Error::SqlxError { source: e }
+                }
+            })?;
+
+        Ok(rec)
+    }
+
+    async fn create_in_transaction(
+        &self,
+        txt: &mut Transaction<'_, Postgres>,
+        sequencer_id: SequencerId,
+        table_id: TableId,
+        partition_id: PartitionId,
+        object_store_id: Uuid,
+        min_sequence_number: SequenceNumber,
+        max_sequence_number: SequenceNumber,
+        min_time: Timestamp,
+        max_time: Timestamp,
+    ) -> Result<ParquetFile> 
+    {
+        let rec = sqlx::query_as::<_, ParquetFile>(
+            r#"
+INSERT INTO parquet_file ( sequencer_id, table_id, partition_id, object_store_id, min_sequence_number, max_sequence_number, min_time, max_time, to_delete )
+VALUES ( $1, $2, $3, $4, $5, $6, $7, $8, false )
+RETURNING *
+        "#,
+        )
+            .bind(sequencer_id) // $1
+            .bind(table_id) // $2
+            .bind(partition_id) // $3
+            .bind(object_store_id) // $4
+            .bind(min_sequence_number) // $5
+            .bind(max_sequence_number) // $6
+            .bind(min_time) // $7
+            .bind(max_time) // $8
+            .fetch_one(txt)
             .await
             .map_err(|e| {
                 if is_unique_violation(&e) {
@@ -567,51 +673,51 @@ RETURNING *
 
 #[async_trait]
 impl ProcessedTombstoneRepo for PostgresCatalog {
-    async fn create(
-        &self,
-        tombstone_id: TombstoneId,
-        parquet_file_id: ParquetFileId,
-    ) -> Result<ProcessedTombstone> {
-        let rec = sqlx::query_as::<_, ProcessedTombstone>(
-            r#"
-INSERT INTO processed_tombstone ( tombstone_id, parquet_file_id )
-VALUES ( $1, $2 )
-RETURNING *
-        "#,
-        )
-        .bind(tombstone_id) // $1
-        .bind(parquet_file_id) // $2
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| {
-            if is_unique_violation(&e) {
-                Error::ProcessTombstoneExists {
-                    tombstone_id: tombstone_id.get(),
-                    parquet_file_id: parquet_file_id.get(),
-                }
-            } else if is_fk_violation(&e) {
-                Error::ForeignKeyViolation { source: e }
-            } else {
-                Error::SqlxError { source: e }
-            }
-        })?;
-
-        Ok(rec)
-    }
-
     async fn create_many(
         &self,
+        txt: &mut Option<Transaction<'_, Postgres>>,
         parquet_file_id: ParquetFileId,
         tombstones: &[Tombstone],
     ) -> Result<Vec<ProcessedTombstone>> {
-        let processed_tombstone_repo = self.processed_tombstones();
+
+        if txt.is_none() {
+            return Err(Error::NoTransaction);
+        }
+        let txt = txt.unwrap();
+
         let mut processed_tombstones = vec![];
+
         for tombstone in tombstones {
-            // todo: make this function a part of the transaction defined in add_parquet_file_with_tombstones
-            let processed_tombstone = processed_tombstone_repo
-                .create(tombstone.id, parquet_file_id)
-                .await;
-            if let Ok(processed_tombstone) = processed_tombstone {
+            let rec = sqlx::query_as::<_, ProcessedTombstone>(
+            r#"
+                INSERT INTO processed_tombstone ( tombstone_id, parquet_file_id )
+                VALUES ( $1, $2 )
+                RETURNING *
+                "#,
+                )
+                .bind(tombstone.id) // $1
+                .bind(parquet_file_id) // $2
+                .fetch_one(&mut *txt)
+                .await 
+                .map_err(|e| {
+                    if is_unique_violation(&e) {
+                        Error::ProcessTombstoneExists {
+                            tombstone_id: tombstone.id.get(),
+                            parquet_file_id: parquet_file_id.get(),
+                        }
+                    } else if is_fk_violation(&e) {
+                        Error::ForeignKeyViolation { source: e }
+                    } else {
+                        Error::SqlxError { source: e }
+                    }
+                });
+
+            if rec.is_err() {
+                // The insert fails due to some issue, issue warning and continue to insert others
+                let error = rec.unwrap_err().to_string();
+                warn!(tombstone_id=tombstone.id.get(), parquet_file_id=parquet_file_id.get(),  "{}", error);
+            } else {
+                let processed_tombstone = rec.unwrap();
                 processed_tombstones.push(processed_tombstone);
             }
         }
