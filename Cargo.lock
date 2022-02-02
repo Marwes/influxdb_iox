@@ -1927,9 +1927,11 @@ name = "ingester"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "arrow-flight",
  "arrow_util",
  "base64 0.13.0",
  "bytes",
+ "client_util",
  "data_types",
  "datafusion 0.1.0",
  "futures",
@@ -1946,12 +1948,14 @@ dependencies = [
  "predicate",
  "prost",
  "query",
+ "rand",
  "schema",
  "snafu",
  "test_helpers",
  "thiserror",
  "time 0.1.0",
  "tokio",
+ "tonic",
  "uuid",
  "workspace-hack",
 ]

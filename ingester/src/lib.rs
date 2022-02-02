@@ -13,9 +13,12 @@
 )]
 #![allow(dead_code)]
 
+pub use client_util::connection;
+
 pub mod catalog_update;
 pub mod compact;
 pub mod data;
+pub mod flight;
 pub mod handler;
 pub mod persist;
 pub mod query;
