@@ -21,6 +21,15 @@ pub struct RLE<P, L, T>
 where
     P: PartialOrd + Debug,
 {
+    inner: RLEInner<P, T>,
+    _marker: PhantomData<L>,
+}
+
+#[derive(Debug)]
+pub struct RLEInner<P, T>
+where
+    P: PartialOrd + Debug,
+{
     // stores tuples of run-lengths. Each value is repeats the total number of
     // times the second value should is repeated within the column.
     //
@@ -57,7 +66,29 @@ where
     // The transcoder is responsible for converting from physical type `P` to
     // logical type `L`.
     transcoder: T,
-    _marker: PhantomData<L>,
+}
+
+// FIXME
+impl<P, L, T> std::ops::Deref for RLE<P, L, T>
+where
+    P: PartialOrd + Debug,
+{
+    type Target = RLEInner<P, T>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+// FIXME
+impl<P, L, T> std::ops::DerefMut for RLE<P, L, T>
+where
+    P: PartialOrd + Debug,
+{
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
 }
 
 impl<P, L, T> std::fmt::Display for RLE<P, L, T>
@@ -74,7 +105,7 @@ where
             self.size(false),
             self.num_rows(),
             self.null_count(),
-            self.run_lengths.len()
+            self.inner.run_lengths.len()
         )
     }
 }
@@ -94,10 +125,12 @@ where
     /// defines how to convert stored physical types to logical columns types.
     pub fn new_from_iter_opt(mut data: impl Iterator<Item = Option<P>>, transcoder: T) -> Self {
         let mut enc = Self {
-            run_lengths: vec![],
-            null_count: 0,
-            num_rows: 0,
-            transcoder,
+            inner: RLEInner {
+                run_lengths: vec![],
+                null_count: 0,
+                num_rows: 0,
+                transcoder,
+            },
             _marker: Default::default(),
         };
 
@@ -144,7 +177,12 @@ where
             None => self.push_additional_none(additional),
         }
     }
+}
 
+impl<P, T> RLEInner<P, T>
+where
+    P: Copy + Debug + PartialOrd + Send + Sync,
+{
     fn push_additional_some(&mut self, v: P, additional: u32) {
         if let Some((rl, rlv)) = self.run_lengths.last_mut() {
             if rlv.as_ref() == Some(&v) {
@@ -191,7 +229,7 @@ where
     fn row_ids_cmp_equal(&self, value: P, op: &cmp::Operator, mut dst: RowIDs) -> RowIDs {
         dst.clear();
 
-        if self.num_rows() == 0 {
+        if self.num_rows == 0 {
             return dst;
         }
 
@@ -231,7 +269,7 @@ where
     fn row_ids_cmp(&self, value: P, op: &cmp::Operator, mut dst: RowIDs) -> RowIDs {
         dst.clear();
 
-        if self.num_rows() == 0 {
+        if self.num_rows == 0 {
             return dst;
         }
 
@@ -307,8 +345,8 @@ where
     fn all_non_null_row_ids(&self, mut dst: RowIDs) -> RowIDs {
         dst.clear();
 
-        if self.null_count() == 0 {
-            dst.add_range(0, self.num_rows());
+        if self.null_count == 0 {
+            dst.add_range(0, self.num_rows);
             return dst;
         }
 
@@ -321,17 +359,6 @@ where
         }
 
         dst
-    }
-
-    // Helper function to convert comparison operators to cmp orderings.
-    fn ord_from_op(op: &cmp::Operator) -> (Ordering, Ordering) {
-        match op {
-            cmp::Operator::GT => (Ordering::Greater, Ordering::Greater),
-            cmp::Operator::GTE => (Ordering::Greater, Ordering::Equal),
-            cmp::Operator::LT => (Ordering::Less, Ordering::Less),
-            cmp::Operator::LTE => (Ordering::Less, Ordering::Equal),
-            _ => panic!("cannot convert operator to ordering"),
-        }
     }
 
     // assertion helper to ensure invariant during debug builds.
@@ -348,6 +375,17 @@ where
             last = row_id;
         }
         true
+    }
+}
+
+// Helper function to convert comparison operators to cmp orderings.
+fn ord_from_op(op: &cmp::Operator) -> (Ordering, Ordering) {
+    match op {
+        cmp::Operator::GT => (Ordering::Greater, Ordering::Greater),
+        cmp::Operator::GTE => (Ordering::Greater, Ordering::Equal),
+        cmp::Operator::LT => (Ordering::Less, Ordering::Less),
+        cmp::Operator::LTE => (Ordering::Less, Ordering::Equal),
+        _ => panic!("cannot convert operator to ordering"),
     }
 }
 
@@ -450,8 +488,8 @@ where
             | (cmp::Operator::LT, cmp::Operator::GTE)
             | (cmp::Operator::LTE, cmp::Operator::GT)
             | (cmp::Operator::LTE, cmp::Operator::GTE) => self.row_ids_cmp_range(
-                (&left.0, Self::ord_from_op(&left.1)),
-                (&right.0, Self::ord_from_op(&right.1)),
+                (&left.0, ord_from_op(&left.1)),
+                (&right.0, ord_from_op(&right.1)),
                 dst,
             ),
 
