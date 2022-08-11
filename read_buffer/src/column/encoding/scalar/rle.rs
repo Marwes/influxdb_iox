@@ -21,12 +21,15 @@ pub struct RLE<P, L, T>
 where
     P: PartialOrd + Debug,
 {
-    inner: RLEInner<P, T>,
+    inner: RLEInner<P>,
+    // The transcoder is responsible for converting from physical type `P` to
+    // logical type `L`.
+    transcoder: T,
     _marker: PhantomData<L>,
 }
 
 #[derive(Debug)]
-pub struct RLEInner<P, T>
+pub struct RLEInner<P>
 where
     P: PartialOrd + Debug,
 {
@@ -62,10 +65,6 @@ where
 
     // number of total logical rows (values) in the columns.
     num_rows: u32,
-
-    // The transcoder is responsible for converting from physical type `P` to
-    // logical type `L`.
-    transcoder: T,
 }
 
 // FIXME
@@ -73,7 +72,7 @@ impl<P, L, T> std::ops::Deref for RLE<P, L, T>
 where
     P: PartialOrd + Debug,
 {
-    type Target = RLEInner<P, T>;
+    type Target = RLEInner<P>;
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -129,8 +128,8 @@ where
                 run_lengths: vec![],
                 null_count: 0,
                 num_rows: 0,
-                transcoder,
             },
+            transcoder,
             _marker: Default::default(),
         };
 
@@ -179,7 +178,7 @@ where
     }
 }
 
-impl<P, T> RLEInner<P, T>
+impl<P> RLEInner<P>
 where
     P: Copy + Debug + PartialOrd + Send + Sync,
 {
@@ -255,6 +254,43 @@ where
         }
 
         dst
+    }
+
+    fn row_ids_filter(&self, value: P, op: &cmp::Operator, dst: RowIDs) -> RowIDs {
+        debug!(value=?value, operator=?op, encoding=?ENCODING_NAME, "row_ids_filter encoded expr");
+
+        match op {
+            cmp::Operator::GT | cmp::Operator::GTE | cmp::Operator::LT | cmp::Operator::LTE => {
+                self.row_ids_cmp(value, &op, dst)
+            }
+            _ => self.row_ids_cmp_equal(value, &op, dst),
+        }
+    }
+
+    fn row_ids_filter_range(
+        &self,
+        left: (P, cmp::Operator),
+        right: (P, cmp::Operator),
+        dst: RowIDs,
+    ) -> RowIDs {
+        debug!(left=?left, right=?right, encoding=?ENCODING_NAME, "row_ids_filter_range encoded expr");
+
+        match (&left.1, &right.1) {
+            (cmp::Operator::GT, cmp::Operator::LT)
+            | (cmp::Operator::GT, cmp::Operator::LTE)
+            | (cmp::Operator::GTE, cmp::Operator::LT)
+            | (cmp::Operator::GTE, cmp::Operator::LTE)
+            | (cmp::Operator::LT, cmp::Operator::GT)
+            | (cmp::Operator::LT, cmp::Operator::GTE)
+            | (cmp::Operator::LTE, cmp::Operator::GT)
+            | (cmp::Operator::LTE, cmp::Operator::GTE) => self.row_ids_cmp_range(
+                (&left.0, ord_from_op(&left.1)),
+                (&right.0, ord_from_op(&right.1)),
+                dst,
+            ),
+
+            (_, _) => panic!("unsupported operators provided"),
+        }
     }
 
     // Finds row ids for non-null values based on <, <=, > or >= operator.
@@ -451,14 +487,7 @@ where
                 };
             }
         };
-        debug!(value=?value, operator=?op, encoding=?ENCODING_NAME, "row_ids_filter encoded expr");
-
-        match op {
-            cmp::Operator::GT | cmp::Operator::GTE | cmp::Operator::LT | cmp::Operator::LTE => {
-                self.row_ids_cmp(value, &op, dst)
-            }
-            _ => self.row_ids_cmp_equal(value, &op, dst),
-        }
+        self.inner.row_ids_filter(value, &op, dst)
     }
 
     fn row_ids_filter_range(
@@ -476,24 +505,8 @@ where
             .transcoder
             .encode_comparable(right.0, *right.1)
             .expect("transcoder must return Some variant");
-        debug!(left=?left, right=?right, encoding=?ENCODING_NAME, "row_ids_filter_range encoded expr");
 
-        match (&left.1, &right.1) {
-            (cmp::Operator::GT, cmp::Operator::LT)
-            | (cmp::Operator::GT, cmp::Operator::LTE)
-            | (cmp::Operator::GTE, cmp::Operator::LT)
-            | (cmp::Operator::GTE, cmp::Operator::LTE)
-            | (cmp::Operator::LT, cmp::Operator::GT)
-            | (cmp::Operator::LT, cmp::Operator::GTE)
-            | (cmp::Operator::LTE, cmp::Operator::GT)
-            | (cmp::Operator::LTE, cmp::Operator::GTE) => self.row_ids_cmp_range(
-                (&left.0, ord_from_op(&left.1)),
-                (&right.0, ord_from_op(&right.1)),
-                dst,
-            ),
-
-            (_, _) => panic!("unsupported operators provided"),
-        }
+        self.inner.row_ids_filter_range(left, right, dst)
     }
 
     /// TODO(edd): a sparse index on this can help with materialisation cost by
