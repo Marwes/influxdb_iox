@@ -99,15 +99,43 @@ where
 
     /// Initialise a new RLE encoding from the provided iterator. The transcoder
     /// defines how to convert stored physical types to logical columns types.
-    pub fn new_from_iter_opt(mut data: impl Iterator<Item = Option<P>>, transcoder: T) -> Self {
-        let mut enc = Self {
-            inner: RLEInner {
-                run_lengths: vec![],
-                null_count: 0,
-                num_rows: 0,
-            },
+    pub fn new_from_iter_opt(data: impl Iterator<Item = Option<P>>, transcoder: T) -> Self {
+        Self {
+            inner: RLEInner::new_from_iter_opt(data),
             transcoder,
             _marker: Default::default(),
+        }
+    }
+
+    /// Adds the provided string value to the encoded data. It is the caller's
+    /// responsibility to ensure that the dictionary encoded remains sorted.
+    pub fn push(&mut self, v: P) {
+        self.push_additional(Some(v), 1);
+    }
+
+    /// Adds a NULL value to the encoded data. It is the caller's
+    /// responsibility to ensure that the dictionary encoded remains sorted.
+    pub fn push_none(&mut self) {
+        self.push_additional(None, 1);
+    }
+
+    /// Adds additional repetitions of the provided value to the encoded data.
+    /// It is the caller's responsibility to ensure that the dictionary encoded
+    /// remains sorted.
+    pub fn push_additional(&mut self, v: Option<P>, additional: u32) {
+        self.inner.push_additional(v, additional)
+    }
+}
+
+impl<P> RLEInner<P>
+where
+    P: Copy + Debug + PartialOrd + Send + Sync,
+{
+    fn new_from_iter_opt(mut data: impl Iterator<Item = Option<P>>) -> Self {
+        let mut enc = RLEInner {
+            run_lengths: vec![],
+            null_count: 0,
+            num_rows: 0,
         };
 
         let first = match data.next() {
@@ -132,33 +160,13 @@ where
         enc
     }
 
-    /// Adds the provided string value to the encoded data. It is the caller's
-    /// responsibility to ensure that the dictionary encoded remains sorted.
-    pub fn push(&mut self, v: P) {
-        self.push_additional(Some(v), 1);
-    }
-
-    /// Adds a NULL value to the encoded data. It is the caller's
-    /// responsibility to ensure that the dictionary encoded remains sorted.
-    pub fn push_none(&mut self) {
-        self.push_additional(None, 1);
-    }
-
-    /// Adds additional repetitions of the provided value to the encoded data.
-    /// It is the caller's responsibility to ensure that the dictionary encoded
-    /// remains sorted.
-    pub fn push_additional(&mut self, v: Option<P>, additional: u32) {
+    fn push_additional(&mut self, v: Option<P>, additional: u32) {
         match v {
-            Some(v) => self.inner.push_additional_some(v, additional),
-            None => self.inner.push_additional_none(additional),
+            Some(v) => self.push_additional_some(v, additional),
+            None => self.push_additional_none(additional),
         }
     }
-}
 
-impl<P> RLEInner<P>
-where
-    P: Copy + Debug + PartialOrd + Send + Sync,
-{
     fn push_additional_some(&mut self, v: P, additional: u32) {
         if let Some((rl, rlv)) = self.run_lengths.last_mut() {
             if rlv.as_ref() == Some(&v) {
