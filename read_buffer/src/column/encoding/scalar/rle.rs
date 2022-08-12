@@ -67,29 +67,6 @@ where
     num_rows: u32,
 }
 
-// FIXME
-impl<P, L, T> std::ops::Deref for RLE<P, L, T>
-where
-    P: PartialOrd + Debug,
-{
-    type Target = RLEInner<P>;
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-// FIXME
-impl<P, L, T> std::ops::DerefMut for RLE<P, L, T>
-where
-    P: PartialOrd + Debug,
-{
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
 impl<P, L, T> std::fmt::Display for RLE<P, L, T>
 where
     P: Copy + Debug + PartialOrd + Send + Sync,
@@ -172,8 +149,8 @@ where
     /// remains sorted.
     pub fn push_additional(&mut self, v: Option<P>, additional: u32) {
         match v {
-            Some(v) => self.push_additional_some(v, additional),
-            None => self.push_additional_none(additional),
+            Some(v) => self.inner.push_additional_some(v, additional),
+            None => self.inner.push_additional_none(additional),
         }
     }
 }
@@ -412,6 +389,53 @@ where
         }
         true
     }
+
+    fn has_non_null_value(&self, row_ids: &[u32]) -> bool {
+        assert!(!row_ids.is_empty(), "no row IDs provided");
+        // Ensure row ids ordered
+        debug_assert!(self.check_row_ids_ordered(row_ids));
+
+        assert!(
+            row_ids.len() <= self.num_rows as usize,
+            "more row_ids {:?} than rows {:?}",
+            row_ids.len(),
+            self.num_rows
+        );
+
+        let mut curr_logical_row_id = 0;
+        let (mut curr_entry_rl, mut curr_value) = self.run_lengths[0];
+
+        let mut i = 1;
+        for &row_id in row_ids {
+            assert!(
+                row_id < self.num_rows,
+                "row_id {:?} beyond max row {:?}",
+                row_id,
+                self.num_rows - 1
+            );
+
+            // find correctly logical row for `row_id`.
+            while curr_logical_row_id + curr_entry_rl <= row_id {
+                // this encoded entry does not cover the row we need.
+                // move on to next entry
+                curr_logical_row_id += curr_entry_rl;
+                curr_entry_rl = self.run_lengths[i].0;
+                curr_value = self.run_lengths[i].1;
+
+                i += 1;
+            }
+
+            if curr_value.is_some() {
+                return true;
+            }
+
+            curr_logical_row_id += 1; // move forwards a logical row
+            curr_entry_rl -= 1;
+        }
+
+        // all provide row IDs contain NULL values
+        false
+    }
 }
 
 // Helper function to convert comparison operators to cmp orderings.
@@ -438,8 +462,8 @@ where
     fn size(&self, buffers: bool) -> usize {
         let values = size_of::<(u32, Option<P>)>()
             * match buffers {
-                true => self.run_lengths.capacity(),
-                false => self.run_lengths.len(),
+                true => self.inner.run_lengths.capacity(),
+                false => self.inner.run_lengths.len(),
             };
         std::mem::size_of::<Self>() + values
     }
@@ -453,6 +477,7 @@ where
         // remove NULL values from calculation
         base_size
             + self
+                .inner
                 .run_lengths
                 .iter()
                 .filter_map(|(rl, v)| v.is_some().then(|| *rl as usize * size_of::<Option<L>>()))
@@ -460,11 +485,11 @@ where
     }
 
     fn null_count(&self) -> u32 {
-        self.null_count
+        self.inner.null_count
     }
 
     fn num_rows(&self) -> u32 {
-        self.num_rows
+        self.inner.num_rows
     }
 
     fn row_ids_filter(&self, value: L, op: &cmp::Operator, mut dst: RowIDs) -> RowIDs {
@@ -480,7 +505,7 @@ where
                 return match op {
                     cmp::Operator::Equal => dst,
                     cmp::Operator::NotEqual => {
-                        dst = self.all_non_null_row_ids(dst);
+                        dst = self.inner.all_non_null_row_ids(dst);
                         dst
                     }
                     op => panic!("operator {:?} not expected", op),
@@ -520,7 +545,7 @@ where
         );
 
         let mut ordinal_offset = 0;
-        for (rl, v) in &self.run_lengths {
+        for (rl, v) in &self.inner.run_lengths {
             if ordinal_offset + rl > row_id {
                 // this run-length overlaps desired row id
                 return v.map(|v| self.transcoder.decode(v));
@@ -561,10 +586,10 @@ where
         let mut dst = Vec::with_capacity(row_ids.len());
 
         // Ensure row ids ordered
-        debug_assert!(self.check_row_ids_ordered(row_ids));
+        debug_assert!(self.inner.check_row_ids_ordered(row_ids));
 
         let mut curr_logical_row_id = 0;
-        let (mut curr_entry_rl, mut curr_value) = self.run_lengths[0];
+        let (mut curr_entry_rl, mut curr_value) = self.inner.run_lengths[0];
 
         let mut i = 1;
         for &row_id in row_ids {
@@ -579,8 +604,8 @@ where
                 // this encoded entry does not cover the row we need.
                 // move on to next entry
                 curr_logical_row_id += curr_entry_rl;
-                curr_entry_rl = self.run_lengths[i].0;
-                curr_value = self.run_lengths[i].1;
+                curr_entry_rl = self.inner.run_lengths[i].0;
+                curr_value = self.inner.run_lengths[i].1;
 
                 i += 1;
             }
@@ -599,57 +624,14 @@ where
     fn all_values(&self) -> Either<Vec<L>, Vec<Option<L>>> {
         let mut dst = Vec::with_capacity(self.num_rows() as usize);
 
-        for (rl, v) in &self.run_lengths {
+        for (rl, v) in &self.inner.run_lengths {
             dst.extend(iter::repeat(v.map(|v| self.transcoder.decode(v))).take(*rl as usize));
         }
         Either::Right(dst)
     }
 
     fn has_non_null_value(&self, row_ids: &[u32]) -> bool {
-        assert!(!row_ids.is_empty(), "no row IDs provided");
-        // Ensure row ids ordered
-        debug_assert!(self.check_row_ids_ordered(row_ids));
-
-        assert!(
-            row_ids.len() <= self.num_rows() as usize,
-            "more row_ids {:?} than rows {:?}",
-            row_ids.len(),
-            self.num_rows()
-        );
-
-        let mut curr_logical_row_id = 0;
-        let (mut curr_entry_rl, mut curr_value) = self.run_lengths[0];
-
-        let mut i = 1;
-        for &row_id in row_ids {
-            assert!(
-                row_id < self.num_rows(),
-                "row_id {:?} beyond max row {:?}",
-                row_id,
-                self.num_rows() - 1
-            );
-
-            // find correctly logical row for `row_id`.
-            while curr_logical_row_id + curr_entry_rl <= row_id {
-                // this encoded entry does not cover the row we need.
-                // move on to next entry
-                curr_logical_row_id += curr_entry_rl;
-                curr_entry_rl = self.run_lengths[i].0;
-                curr_value = self.run_lengths[i].1;
-
-                i += 1;
-            }
-
-            if curr_value.is_some() {
-                return true;
-            }
-
-            curr_logical_row_id += 1; // move forwards a logical row
-            curr_entry_rl -= 1;
-        }
-
-        // all provide row IDs contain NULL values
-        false
+        self.inner.has_non_null_value(row_ids)
     }
 
     fn has_any_non_null_value(&self) -> bool {
