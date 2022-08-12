@@ -277,6 +277,7 @@ where
         right: (P, cmp::Operator),
         dst: RowIDs,
     ) -> RowIDs {
+        debug!(left=?left, right=?right, encoding=?ENCODING_NAME, "row_ids_filter_range encoded expr");
         match (&left.1, &right.1) {
             (cmp::Operator::GT, cmp::Operator::LT)
             | (cmp::Operator::GT, cmp::Operator::LTE)
