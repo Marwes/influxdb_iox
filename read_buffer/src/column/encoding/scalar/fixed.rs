@@ -31,15 +31,22 @@ pub struct Fixed<P, L, T>
 where
     P: PartialOrd + Debug,
 {
-    // backing data
-    values: Vec<P>,
-
+    inner: FixedInner<P>,
     // transcoder responsible for converting from physical type `P` to logical
     // type `L`.
     transcoder: T,
     _marker: PhantomData<L>,
     // TODO(edd): perf - consider pushing down totally ordered flag to stop
     // predicate evaluation early.
+}
+
+#[derive(Debug)]
+struct FixedInner<P>
+where
+    P: PartialOrd + Debug,
+{
+    // backing data
+    values: Vec<P>,
 }
 
 impl<P, L, T> std::fmt::Display for Fixed<P, L, T>
@@ -66,23 +73,17 @@ where
 {
     pub fn new(values: Vec<P>, transcoder: T) -> Self {
         Self {
-            values,
+            inner: FixedInner { values },
             transcoder,
             _marker: Default::default(),
         }
     }
+}
 
-    // Helper function to convert comparison operators to cmp orderings.
-    fn ord_from_op(op: &cmp::Operator) -> (Ordering, Ordering) {
-        match op {
-            cmp::Operator::GT => (Ordering::Greater, Ordering::Greater),
-            cmp::Operator::GTE => (Ordering::Greater, Ordering::Equal),
-            cmp::Operator::LT => (Ordering::Less, Ordering::Less),
-            cmp::Operator::LTE => (Ordering::Less, Ordering::Equal),
-            _ => panic!("cannot convert operator to ordering"),
-        }
-    }
-
+impl<P> FixedInner<P>
+where
+    P: Copy + Debug + PartialOrd,
+{
     // Handles finding all rows that match the provided operator on `value`.
     // For performance reasons ranges of matching values are collected up and
     // added in bulk to the bitmap.
@@ -166,7 +167,6 @@ where
         }
         dst
     }
-
     // Special case function for finding all rows that satisfy two operators on
     // two values.
     //
@@ -232,6 +232,41 @@ where
         }
         dst
     }
+
+    fn min(&self, row_ids: &[u32]) -> P {
+        // find smallest physical type
+        let mut min = self.values[row_ids[0] as usize];
+        for &v in row_ids.iter().skip(1) {
+            if self.values[v as usize] < min {
+                min = self.values[v as usize];
+            }
+        }
+
+        min
+    }
+
+    fn max(&self, row_ids: &[u32]) -> P {
+        // find smallest physical type
+        let mut max = self.values[row_ids[0] as usize];
+        for &v in row_ids.iter().skip(1) {
+            if self.values[v as usize] > max {
+                max = self.values[v as usize];
+            }
+        }
+
+        max
+    }
+}
+
+// Helper function to convert comparison operators to cmp orderings.
+fn ord_from_op(op: &cmp::Operator) -> (Ordering, Ordering) {
+    match op {
+        cmp::Operator::GT => (Ordering::Greater, Ordering::Greater),
+        cmp::Operator::GTE => (Ordering::Greater, Ordering::Equal),
+        cmp::Operator::LT => (Ordering::Less, Ordering::Less),
+        cmp::Operator::LTE => (Ordering::Less, Ordering::Equal),
+        _ => panic!("cannot convert operator to ordering"),
+    }
 }
 
 impl<P, L, T> ScalarEncoding<L> for Fixed<P, L, T>
@@ -245,20 +280,20 @@ where
     }
 
     fn num_rows(&self) -> u32 {
-        self.values.len() as u32
+        self.inner.values.len() as u32
     }
 
     fn size(&self, buffers: bool) -> usize {
         let values = size_of::<P>()
             * match buffers {
-                true => self.values.capacity(),
-                false => self.values.len(),
+                true => self.inner.values.capacity(),
+                false => self.inner.values.len(),
             };
         size_of::<Self>() + values
     }
 
     fn size_raw(&self, _: bool) -> usize {
-        size_of::<Vec<L>>() + (size_of::<L>() * self.values.len())
+        size_of::<Vec<L>>() + (size_of::<L>() * self.inner.values.len())
     }
 
     fn null_count(&self) -> u32 {
@@ -274,7 +309,7 @@ where
     }
 
     fn value(&self, row_id: u32) -> Option<L> {
-        let v = self.values[row_id as usize];
+        let v = self.inner.values[row_id as usize];
         Some(self.transcoder.decode(v))
     }
 
@@ -283,15 +318,27 @@ where
 
         // TODO(edd): There will likely be a faster unsafe way to do this.
         for chunks in row_ids.chunks_exact(4) {
-            dst.push(self.transcoder.decode(self.values[chunks[0] as usize]));
-            dst.push(self.transcoder.decode(self.values[chunks[1] as usize]));
-            dst.push(self.transcoder.decode(self.values[chunks[2] as usize]));
-            dst.push(self.transcoder.decode(self.values[chunks[3] as usize]));
+            dst.push(
+                self.transcoder
+                    .decode(self.inner.values[chunks[0] as usize]),
+            );
+            dst.push(
+                self.transcoder
+                    .decode(self.inner.values[chunks[1] as usize]),
+            );
+            dst.push(
+                self.transcoder
+                    .decode(self.inner.values[chunks[2] as usize]),
+            );
+            dst.push(
+                self.transcoder
+                    .decode(self.inner.values[chunks[3] as usize]),
+            );
         }
 
         let rem = row_ids.len() % 4;
         for &i in &row_ids[row_ids.len() - rem..row_ids.len()] {
-            dst.push(self.transcoder.decode(self.values[i as usize]));
+            dst.push(self.transcoder.decode(self.inner.values[i as usize]));
         }
 
         assert_eq!(dst.len(), row_ids.len());
@@ -301,18 +348,18 @@ where
     fn all_values(&self) -> Either<Vec<L>, Vec<Option<L>>> {
         let mut dst = Vec::with_capacity(self.num_rows() as usize);
 
-        for chunks in self.values.chunks_exact(4) {
+        for chunks in self.inner.values.chunks_exact(4) {
             dst.push(self.transcoder.decode(chunks[0]));
             dst.push(self.transcoder.decode(chunks[1]));
             dst.push(self.transcoder.decode(chunks[2]));
             dst.push(self.transcoder.decode(chunks[3]));
         }
 
-        for &v in &self.values[dst.len()..self.values.len()] {
+        for &v in &self.inner.values[dst.len()..self.inner.values.len()] {
             dst.push(self.transcoder.decode(v));
         }
 
-        assert_eq!(dst.len(), self.values.len());
+        assert_eq!(dst.len(), self.inner.values.len());
         Either::Left(dst)
     }
 
@@ -328,28 +375,30 @@ where
 
         // TODO(edd): There may be a faster unsafe way to do this.
         for chunks in row_ids.chunks_exact(4) {
-            result += self.transcoder.decode(self.values[chunks[3] as usize]);
-            result += self.transcoder.decode(self.values[chunks[2] as usize]);
-            result += self.transcoder.decode(self.values[chunks[1] as usize]);
-            result += self.transcoder.decode(self.values[chunks[0] as usize]);
+            result += self
+                .transcoder
+                .decode(self.inner.values[chunks[3] as usize]);
+            result += self
+                .transcoder
+                .decode(self.inner.values[chunks[2] as usize]);
+            result += self
+                .transcoder
+                .decode(self.inner.values[chunks[1] as usize]);
+            result += self
+                .transcoder
+                .decode(self.inner.values[chunks[0] as usize]);
         }
 
         let rem = row_ids.len() % 4;
         for &i in &row_ids[row_ids.len() - rem..row_ids.len()] {
-            result += self.transcoder.decode(self.values[i as usize]);
+            result += self.transcoder.decode(self.inner.values[i as usize]);
         }
 
         Some(result)
     }
 
     fn min(&self, row_ids: &[u32]) -> Option<L> {
-        // find smallest physical type
-        let mut min = self.values[row_ids[0] as usize];
-        for &v in row_ids.iter().skip(1) {
-            if self.values[v as usize] < min {
-                min = self.values[v as usize];
-            }
-        }
+        let min = self.inner.min(row_ids);
 
         // convert to logical type
         Some(self.transcoder.decode(min))
@@ -357,13 +406,7 @@ where
 
     /// Returns the maximum logical (decoded) value from the provided row IDs.
     fn max(&self, row_ids: &[u32]) -> Option<L> {
-        // find smallest physical type
-        let mut max = self.values[row_ids[0] as usize];
-        for &v in row_ids.iter().skip(1) {
-            if self.values[v as usize] > max {
-                max = self.values[v as usize];
-            }
-        }
+        let max = self.inner.max(row_ids);
 
         // convert to logical type
         Some(self.transcoder.decode(max))
@@ -394,11 +437,11 @@ where
         // N.B, the transcoder may have changed the operator depending on the
         // value provided.
         match op {
-            cmp::Operator::GT => self.row_ids_cmp_order(&value, PartialOrd::gt, dst),
-            cmp::Operator::GTE => self.row_ids_cmp_order(&value, PartialOrd::ge, dst),
-            cmp::Operator::LT => self.row_ids_cmp_order(&value, PartialOrd::lt, dst),
-            cmp::Operator::LTE => self.row_ids_cmp_order(&value, PartialOrd::le, dst),
-            _ => self.row_ids_equal(&value, &op, dst),
+            cmp::Operator::GT => self.inner.row_ids_cmp_order(&value, PartialOrd::gt, dst),
+            cmp::Operator::GTE => self.inner.row_ids_cmp_order(&value, PartialOrd::ge, dst),
+            cmp::Operator::LT => self.inner.row_ids_cmp_order(&value, PartialOrd::lt, dst),
+            cmp::Operator::LTE => self.inner.row_ids_cmp_order(&value, PartialOrd::le, dst),
+            _ => self.inner.row_ids_equal(&value, &op, dst),
         }
     }
 
@@ -427,9 +470,9 @@ where
             | (cmp::Operator::LT, cmp::Operator::GT)
             | (cmp::Operator::LT, cmp::Operator::GTE)
             | (cmp::Operator::LTE, cmp::Operator::GT)
-            | (cmp::Operator::LTE, cmp::Operator::GTE) => self.row_ids_cmp_range_order(
-                (&left.0, Self::ord_from_op(&left.1)),
-                (&right.0, Self::ord_from_op(&right.1)),
+            | (cmp::Operator::LTE, cmp::Operator::GTE) => self.inner.row_ids_cmp_range_order(
+                (&left.0, ord_from_op(&left.1)),
+                (&right.0, ord_from_op(&right.1)),
                 dst,
             ),
 
