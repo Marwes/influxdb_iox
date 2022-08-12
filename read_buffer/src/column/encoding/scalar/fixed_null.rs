@@ -31,7 +31,7 @@ where
     P: ArrowNumericType,
     P::Native: PartialEq + PartialOrd,
 {
-    inner: FixedNullInner<P>,
+    physical: FixedNullPhysical<P>,
     // The transcoder is responsible for converting from physical type `P` to
     // logical type `L`.
     transcoder: T,
@@ -39,7 +39,7 @@ where
 }
 
 #[derive(Debug, PartialEq)]
-struct FixedNullInner<P>
+struct FixedNullPhysical<P>
 where
     P: ArrowNumericType,
     P::Native: PartialEq + PartialOrd,
@@ -59,8 +59,8 @@ where
             f,
             "[{}] rows: {:?}, nulls: {:?}, size: {}",
             self.name(),
-            self.inner.arr.len(),
-            self.inner.arr.null_count(),
+            self.physical.arr.len(),
+            self.physical.arr.null_count(),
             self.size(false)
         )
     }
@@ -76,7 +76,7 @@ where
     /// to define how to convert stored physical types to logical columns types.
     pub fn new(arr: PrimitiveArray<P>, transcoder: T) -> Self {
         Self {
-            inner: FixedNullInner { arr },
+            physical: FixedNullPhysical { arr },
             transcoder,
             _marker: Default::default(),
         }
@@ -94,7 +94,7 @@ fn ord_from_op(op: &cmp::Operator) -> (Ordering, Ordering) {
     }
 }
 
-impl<P> FixedNullInner<P>
+impl<P> FixedNullPhysical<P>
 where
     P: ArrowNumericType + Debug + Send + Sync,
 {
@@ -369,11 +369,11 @@ where
     }
 
     fn num_rows(&self) -> u32 {
-        self.inner.num_rows()
+        self.physical.num_rows()
     }
 
     fn has_any_non_null_value(&self) -> bool {
-        self.inner.arr.null_count() < self.num_rows() as usize
+        self.physical.arr.null_count() < self.num_rows() as usize
     }
 
     fn has_non_null_value(&self, row_ids: &[u32]) -> bool {
@@ -383,17 +383,17 @@ where
 
         row_ids
             .iter()
-            .any(|id| !self.inner.arr.is_null(*id as usize))
+            .any(|id| !self.physical.arr.is_null(*id as usize))
     }
 
     fn null_count(&self) -> u32 {
-        self.inner.null_count()
+        self.physical.null_count()
     }
 
     fn size(&self, _: bool) -> usize {
         // no way to differentiate between Arrow array's allocated capacity
         // and minimal footprint.
-        size_of::<Self>() + self.inner.arr.get_array_memory_size()
+        size_of::<Self>() + self.physical.arr.get_array_memory_size()
     }
 
     /// The estimated total size in bytes of the underlying values in the
@@ -404,16 +404,16 @@ where
         if self.null_count() == 0 || include_nulls {
             return base_size + (self.num_rows() as usize * size_of::<L>());
         }
-        base_size + ((self.num_rows() as usize - self.inner.arr.null_count()) * size_of::<L>())
+        base_size + ((self.num_rows() as usize - self.physical.arr.null_count()) * size_of::<L>())
     }
 
     fn value(&self, row_id: u32) -> Option<L> {
-        if self.inner.arr.is_null(row_id as usize) {
+        if self.physical.arr.is_null(row_id as usize) {
             return None;
         }
         Some(
             self.transcoder
-                .decode(self.inner.arr.value(row_id as usize)),
+                .decode(self.physical.arr.value(row_id as usize)),
         )
     }
 
@@ -423,12 +423,12 @@ where
         let mut dst = Vec::with_capacity(row_ids.len());
 
         for &row_id in row_ids {
-            if self.inner.arr.is_null(row_id as usize) {
+            if self.physical.arr.is_null(row_id as usize) {
                 dst.push(None)
             } else {
                 dst.push(Some(
                     self.transcoder
-                        .decode(self.inner.arr.value(row_id as usize)),
+                        .decode(self.physical.arr.value(row_id as usize)),
                 ))
             }
         }
@@ -442,10 +442,10 @@ where
         let mut dst = Vec::with_capacity(self.num_rows() as usize);
 
         for i in 0..self.num_rows() as usize {
-            if self.inner.arr.is_null(i) {
+            if self.physical.arr.is_null(i) {
                 dst.push(None)
             } else {
-                dst.push(Some(self.transcoder.decode(self.inner.arr.value(i))))
+                dst.push(Some(self.transcoder.decode(self.physical.arr.value(i))))
             }
         }
         assert_eq!(dst.len(), self.num_rows() as usize);
@@ -453,13 +453,13 @@ where
     }
 
     fn count(&self, row_ids: &[u32]) -> u32 {
-        if self.inner.arr.null_count() == 0 {
+        if self.physical.arr.null_count() == 0 {
             return row_ids.len() as u32;
         }
 
         let mut count = 0;
         for &i in row_ids {
-            if self.inner.arr.is_null(i as usize) {
+            if self.physical.arr.is_null(i as usize) {
                 continue;
             }
             count += 1;
@@ -474,29 +474,29 @@ where
     fn sum(&self, row_ids: &[u32]) -> Option<L> {
         let mut result = L::default();
 
-        if self.inner.arr.null_count() == 0 {
+        if self.physical.arr.null_count() == 0 {
             for chunks in row_ids.chunks_exact(4) {
                 result = result
                     + self
                         .transcoder
-                        .decode(self.inner.arr.value(chunks[3] as usize));
+                        .decode(self.physical.arr.value(chunks[3] as usize));
                 result = result
                     + self
                         .transcoder
-                        .decode(self.inner.arr.value(chunks[2] as usize));
+                        .decode(self.physical.arr.value(chunks[2] as usize));
                 result = result
                     + self
                         .transcoder
-                        .decode(self.inner.arr.value(chunks[1] as usize));
+                        .decode(self.physical.arr.value(chunks[1] as usize));
                 result = result
                     + self
                         .transcoder
-                        .decode(self.inner.arr.value(chunks[0] as usize));
+                        .decode(self.physical.arr.value(chunks[0] as usize));
             }
 
             let rem = row_ids.len() % 4;
             for &i in &row_ids[row_ids.len() - rem..row_ids.len()] {
-                result = result + self.transcoder.decode(self.inner.arr.value(i as usize));
+                result = result + self.transcoder.decode(self.physical.arr.value(i as usize));
             }
 
             return Some(result);
@@ -504,11 +504,11 @@ where
 
         let mut is_none = true;
         for &i in row_ids {
-            if self.inner.arr.is_null(i as usize) {
+            if self.physical.arr.is_null(i as usize) {
                 continue;
             }
             is_none = false;
-            result = result + self.transcoder.decode(self.inner.arr.value(i as usize));
+            result = result + self.transcoder.decode(self.physical.arr.value(i as usize));
         }
 
         if is_none {
@@ -519,14 +519,18 @@ where
 
     fn min(&self, row_ids: &[u32]) -> Option<L> {
         // convert minimum physical value to logical value.
-        self.inner.min(row_ids).map(|v| self.transcoder.decode(v))
+        self.physical
+            .min(row_ids)
+            .map(|v| self.transcoder.decode(v))
     }
 
     /// Returns the maximum logical (decoded) non-null value from the provided
     /// row IDs.
     fn max(&self, row_ids: &[u32]) -> Option<L> {
         // convert maximum physical value to logical value.
-        self.inner.max(row_ids).map(|v| self.transcoder.decode(v))
+        self.physical
+            .max(row_ids)
+            .map(|v| self.transcoder.decode(v))
     }
 
     fn row_ids_filter(&self, value: L, op: &cmp::Operator, mut dst: RowIDs) -> RowIDs {
@@ -542,7 +546,7 @@ where
                 return match op {
                     cmp::Operator::Equal => dst,
                     cmp::Operator::NotEqual => {
-                        dst = self.inner.all_non_null_row_ids(dst);
+                        dst = self.physical.all_non_null_row_ids(dst);
                         dst
                     }
                     op => panic!("operator {:?} not expected", op),
@@ -550,7 +554,7 @@ where
             }
         };
 
-        self.inner.row_ids_filter(value, &op, dst)
+        self.physical.row_ids_filter(value, &op, dst)
     }
 
     fn row_ids_filter_range(
@@ -569,7 +573,7 @@ where
             .encode_comparable(right.0, *right.1)
             .expect("transcoder must return Some variant");
 
-        self.inner.row_ids_filter_range(left, right, dst)
+        self.physical.row_ids_filter_range(left, right, dst)
     }
 }
 

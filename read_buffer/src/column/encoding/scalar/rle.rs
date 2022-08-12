@@ -21,7 +21,7 @@ pub struct RLE<P, L, T>
 where
     P: PartialOrd + Debug,
 {
-    inner: RLEInner<P>,
+    physical: RLEPhysical<P>,
     // The transcoder is responsible for converting from physical type `P` to
     // logical type `L`.
     transcoder: T,
@@ -29,7 +29,7 @@ where
 }
 
 #[derive(Debug)]
-pub struct RLEInner<P>
+pub struct RLEPhysical<P>
 where
     P: PartialOrd + Debug,
 {
@@ -81,7 +81,7 @@ where
             self.size(false),
             self.num_rows(),
             self.null_count(),
-            self.inner.run_lengths.len()
+            self.physical.run_lengths.len()
         )
     }
 }
@@ -101,7 +101,7 @@ where
     /// defines how to convert stored physical types to logical columns types.
     pub fn new_from_iter_opt(data: impl Iterator<Item = Option<P>>, transcoder: T) -> Self {
         Self {
-            inner: RLEInner::new_from_iter_opt(data),
+            physical: RLEPhysical::new_from_iter_opt(data),
             transcoder,
             _marker: Default::default(),
         }
@@ -123,16 +123,16 @@ where
     /// It is the caller's responsibility to ensure that the dictionary encoded
     /// remains sorted.
     pub fn push_additional(&mut self, v: Option<P>, additional: u32) {
-        self.inner.push_additional(v, additional)
+        self.physical.push_additional(v, additional)
     }
 }
 
-impl<P> RLEInner<P>
+impl<P> RLEPhysical<P>
 where
     P: Copy + Debug + PartialOrd + Send + Sync,
 {
     fn new_from_iter_opt(mut data: impl Iterator<Item = Option<P>>) -> Self {
-        let mut enc = RLEInner {
+        let mut enc = RLEPhysical {
             run_lengths: vec![],
             null_count: 0,
             num_rows: 0,
@@ -470,8 +470,8 @@ where
     fn size(&self, buffers: bool) -> usize {
         let values = size_of::<(u32, Option<P>)>()
             * match buffers {
-                true => self.inner.run_lengths.capacity(),
-                false => self.inner.run_lengths.len(),
+                true => self.physical.run_lengths.capacity(),
+                false => self.physical.run_lengths.len(),
             };
         std::mem::size_of::<Self>() + values
     }
@@ -485,7 +485,7 @@ where
         // remove NULL values from calculation
         base_size
             + self
-                .inner
+                .physical
                 .run_lengths
                 .iter()
                 .filter_map(|(rl, v)| v.is_some().then(|| *rl as usize * size_of::<Option<L>>()))
@@ -493,11 +493,11 @@ where
     }
 
     fn null_count(&self) -> u32 {
-        self.inner.null_count
+        self.physical.null_count
     }
 
     fn num_rows(&self) -> u32 {
-        self.inner.num_rows
+        self.physical.num_rows
     }
 
     fn row_ids_filter(&self, value: L, op: &cmp::Operator, mut dst: RowIDs) -> RowIDs {
@@ -513,14 +513,14 @@ where
                 return match op {
                     cmp::Operator::Equal => dst,
                     cmp::Operator::NotEqual => {
-                        dst = self.inner.all_non_null_row_ids(dst);
+                        dst = self.physical.all_non_null_row_ids(dst);
                         dst
                     }
                     op => panic!("operator {:?} not expected", op),
                 };
             }
         };
-        self.inner.row_ids_filter(value, &op, dst)
+        self.physical.row_ids_filter(value, &op, dst)
     }
 
     fn row_ids_filter_range(
@@ -539,7 +539,7 @@ where
             .encode_comparable(right.0, *right.1)
             .expect("transcoder must return Some variant");
 
-        self.inner.row_ids_filter_range(left, right, dst)
+        self.physical.row_ids_filter_range(left, right, dst)
     }
 
     /// TODO(edd): a sparse index on this can help with materialisation cost by
@@ -553,7 +553,7 @@ where
         );
 
         let mut ordinal_offset = 0;
-        for (rl, v) in &self.inner.run_lengths {
+        for (rl, v) in &self.physical.run_lengths {
             if ordinal_offset + rl > row_id {
                 // this run-length overlaps desired row id
                 return v.map(|v| self.transcoder.decode(v));
@@ -594,10 +594,10 @@ where
         let mut dst = Vec::with_capacity(row_ids.len());
 
         // Ensure row ids ordered
-        debug_assert!(self.inner.check_row_ids_ordered(row_ids));
+        debug_assert!(self.physical.check_row_ids_ordered(row_ids));
 
         let mut curr_logical_row_id = 0;
-        let (mut curr_entry_rl, mut curr_value) = self.inner.run_lengths[0];
+        let (mut curr_entry_rl, mut curr_value) = self.physical.run_lengths[0];
 
         let mut i = 1;
         for &row_id in row_ids {
@@ -612,8 +612,8 @@ where
                 // this encoded entry does not cover the row we need.
                 // move on to next entry
                 curr_logical_row_id += curr_entry_rl;
-                curr_entry_rl = self.inner.run_lengths[i].0;
-                curr_value = self.inner.run_lengths[i].1;
+                curr_entry_rl = self.physical.run_lengths[i].0;
+                curr_value = self.physical.run_lengths[i].1;
 
                 i += 1;
             }
@@ -632,14 +632,14 @@ where
     fn all_values(&self) -> Either<Vec<L>, Vec<Option<L>>> {
         let mut dst = Vec::with_capacity(self.num_rows() as usize);
 
-        for (rl, v) in &self.inner.run_lengths {
+        for (rl, v) in &self.physical.run_lengths {
             dst.extend(iter::repeat(v.map(|v| self.transcoder.decode(v))).take(*rl as usize));
         }
         Either::Right(dst)
     }
 
     fn has_non_null_value(&self, row_ids: &[u32]) -> bool {
-        self.inner.has_non_null_value(row_ids)
+        self.physical.has_non_null_value(row_ids)
     }
 
     fn has_any_non_null_value(&self) -> bool {

@@ -31,7 +31,7 @@ pub struct Fixed<P, L, T>
 where
     P: PartialOrd + Debug,
 {
-    inner: FixedInner<P>,
+    physical: FixedPhysical<P>,
     // transcoder responsible for converting from physical type `P` to logical
     // type `L`.
     transcoder: T,
@@ -41,7 +41,7 @@ where
 }
 
 #[derive(Debug)]
-struct FixedInner<P>
+struct FixedPhysical<P>
 where
     P: PartialOrd + Debug,
 {
@@ -73,14 +73,14 @@ where
 {
     pub fn new(values: Vec<P>, transcoder: T) -> Self {
         Self {
-            inner: FixedInner { values },
+            physical: FixedPhysical { values },
             transcoder,
             _marker: Default::default(),
         }
     }
 }
 
-impl<P> FixedInner<P>
+impl<P> FixedPhysical<P>
 where
     P: Copy + Debug + PartialOrd,
 {
@@ -318,20 +318,20 @@ where
     }
 
     fn num_rows(&self) -> u32 {
-        self.inner.values.len() as u32
+        self.physical.values.len() as u32
     }
 
     fn size(&self, buffers: bool) -> usize {
         let values = size_of::<P>()
             * match buffers {
-                true => self.inner.values.capacity(),
-                false => self.inner.values.len(),
+                true => self.physical.values.capacity(),
+                false => self.physical.values.len(),
             };
         size_of::<Self>() + values
     }
 
     fn size_raw(&self, _: bool) -> usize {
-        size_of::<Vec<L>>() + (size_of::<L>() * self.inner.values.len())
+        size_of::<Vec<L>>() + (size_of::<L>() * self.physical.values.len())
     }
 
     fn null_count(&self) -> u32 {
@@ -347,7 +347,7 @@ where
     }
 
     fn value(&self, row_id: u32) -> Option<L> {
-        let v = self.inner.values[row_id as usize];
+        let v = self.physical.values[row_id as usize];
         Some(self.transcoder.decode(v))
     }
 
@@ -358,25 +358,25 @@ where
         for chunks in row_ids.chunks_exact(4) {
             dst.push(
                 self.transcoder
-                    .decode(self.inner.values[chunks[0] as usize]),
+                    .decode(self.physical.values[chunks[0] as usize]),
             );
             dst.push(
                 self.transcoder
-                    .decode(self.inner.values[chunks[1] as usize]),
+                    .decode(self.physical.values[chunks[1] as usize]),
             );
             dst.push(
                 self.transcoder
-                    .decode(self.inner.values[chunks[2] as usize]),
+                    .decode(self.physical.values[chunks[2] as usize]),
             );
             dst.push(
                 self.transcoder
-                    .decode(self.inner.values[chunks[3] as usize]),
+                    .decode(self.physical.values[chunks[3] as usize]),
             );
         }
 
         let rem = row_ids.len() % 4;
         for &i in &row_ids[row_ids.len() - rem..row_ids.len()] {
-            dst.push(self.transcoder.decode(self.inner.values[i as usize]));
+            dst.push(self.transcoder.decode(self.physical.values[i as usize]));
         }
 
         assert_eq!(dst.len(), row_ids.len());
@@ -386,18 +386,18 @@ where
     fn all_values(&self) -> Either<Vec<L>, Vec<Option<L>>> {
         let mut dst = Vec::with_capacity(self.num_rows() as usize);
 
-        for chunks in self.inner.values.chunks_exact(4) {
+        for chunks in self.physical.values.chunks_exact(4) {
             dst.push(self.transcoder.decode(chunks[0]));
             dst.push(self.transcoder.decode(chunks[1]));
             dst.push(self.transcoder.decode(chunks[2]));
             dst.push(self.transcoder.decode(chunks[3]));
         }
 
-        for &v in &self.inner.values[dst.len()..self.inner.values.len()] {
+        for &v in &self.physical.values[dst.len()..self.physical.values.len()] {
             dst.push(self.transcoder.decode(v));
         }
 
-        assert_eq!(dst.len(), self.inner.values.len());
+        assert_eq!(dst.len(), self.physical.values.len());
         Either::Left(dst)
     }
 
@@ -415,28 +415,28 @@ where
         for chunks in row_ids.chunks_exact(4) {
             result += self
                 .transcoder
-                .decode(self.inner.values[chunks[3] as usize]);
+                .decode(self.physical.values[chunks[3] as usize]);
             result += self
                 .transcoder
-                .decode(self.inner.values[chunks[2] as usize]);
+                .decode(self.physical.values[chunks[2] as usize]);
             result += self
                 .transcoder
-                .decode(self.inner.values[chunks[1] as usize]);
+                .decode(self.physical.values[chunks[1] as usize]);
             result += self
                 .transcoder
-                .decode(self.inner.values[chunks[0] as usize]);
+                .decode(self.physical.values[chunks[0] as usize]);
         }
 
         let rem = row_ids.len() % 4;
         for &i in &row_ids[row_ids.len() - rem..row_ids.len()] {
-            result += self.transcoder.decode(self.inner.values[i as usize]);
+            result += self.transcoder.decode(self.physical.values[i as usize]);
         }
 
         Some(result)
     }
 
     fn min(&self, row_ids: &[u32]) -> Option<L> {
-        let min = self.inner.min(row_ids);
+        let min = self.physical.min(row_ids);
 
         // convert to logical type
         Some(self.transcoder.decode(min))
@@ -444,7 +444,7 @@ where
 
     /// Returns the maximum logical (decoded) value from the provided row IDs.
     fn max(&self, row_ids: &[u32]) -> Option<L> {
-        let max = self.inner.max(row_ids);
+        let max = self.physical.max(row_ids);
 
         // convert to logical type
         Some(self.transcoder.decode(max))
@@ -471,7 +471,7 @@ where
             }
         };
 
-        self.inner.row_ids_filter(value, &op, dst)
+        self.physical.row_ids_filter(value, &op, dst)
     }
 
     fn row_ids_filter_range(
@@ -489,7 +489,7 @@ where
             .transcoder
             .encode_comparable(right.0, *right.1)
             .expect("transcoder must return Some variant");
-        self.inner.row_ids_filter_range(left, right, dst)
+        self.physical.row_ids_filter_range(left, right, dst)
     }
 }
 
