@@ -256,6 +256,44 @@ where
 
         max
     }
+
+    fn row_ids_filter(&self, value: P, op: &cmp::Operator, dst: RowIDs) -> RowIDs {
+        debug!(value=?value, operator=?op, encoding=?ENCODING_NAME, "row_ids_filter encoded expr");
+
+        // N.B, the transcoder may have changed the operator depending on the
+        // value provided.
+        match op {
+            cmp::Operator::GT => self.row_ids_cmp_order(&value, PartialOrd::gt, dst),
+            cmp::Operator::GTE => self.row_ids_cmp_order(&value, PartialOrd::ge, dst),
+            cmp::Operator::LT => self.row_ids_cmp_order(&value, PartialOrd::lt, dst),
+            cmp::Operator::LTE => self.row_ids_cmp_order(&value, PartialOrd::le, dst),
+            _ => self.row_ids_equal(&value, &op, dst),
+        }
+    }
+
+    fn row_ids_filter_range(
+        &self,
+        left: (P, cmp::Operator),
+        right: (P, cmp::Operator),
+        dst: RowIDs,
+    ) -> RowIDs {
+        match (&left.1, &right.1) {
+            (cmp::Operator::GT, cmp::Operator::LT)
+            | (cmp::Operator::GT, cmp::Operator::LTE)
+            | (cmp::Operator::GTE, cmp::Operator::LT)
+            | (cmp::Operator::GTE, cmp::Operator::LTE)
+            | (cmp::Operator::LT, cmp::Operator::GT)
+            | (cmp::Operator::LT, cmp::Operator::GTE)
+            | (cmp::Operator::LTE, cmp::Operator::GT)
+            | (cmp::Operator::LTE, cmp::Operator::GTE) => self.row_ids_cmp_range_order(
+                (&left.0, ord_from_op(&left.1)),
+                (&right.0, ord_from_op(&right.1)),
+                dst,
+            ),
+
+            (a, b) => panic!("unsupported operators provided: ({:?}, {:?})", a, b),
+        }
+    }
 }
 
 // Helper function to convert comparison operators to cmp orderings.
@@ -432,17 +470,8 @@ where
                 };
             }
         };
-        debug!(value=?value, operator=?op, encoding=?ENCODING_NAME, "row_ids_filter encoded expr");
 
-        // N.B, the transcoder may have changed the operator depending on the
-        // value provided.
-        match op {
-            cmp::Operator::GT => self.inner.row_ids_cmp_order(&value, PartialOrd::gt, dst),
-            cmp::Operator::GTE => self.inner.row_ids_cmp_order(&value, PartialOrd::ge, dst),
-            cmp::Operator::LT => self.inner.row_ids_cmp_order(&value, PartialOrd::lt, dst),
-            cmp::Operator::LTE => self.inner.row_ids_cmp_order(&value, PartialOrd::le, dst),
-            _ => self.inner.row_ids_equal(&value, &op, dst),
-        }
+        self.inner.row_ids_filter(value, &op, dst)
     }
 
     fn row_ids_filter_range(
@@ -460,24 +489,7 @@ where
             .transcoder
             .encode_comparable(right.0, *right.1)
             .expect("transcoder must return Some variant");
-        debug!(left=?left, right=?right, encoding=?ENCODING_NAME, "row_ids_filter_range encoded expr");
-
-        match (&left.1, &right.1) {
-            (cmp::Operator::GT, cmp::Operator::LT)
-            | (cmp::Operator::GT, cmp::Operator::LTE)
-            | (cmp::Operator::GTE, cmp::Operator::LT)
-            | (cmp::Operator::GTE, cmp::Operator::LTE)
-            | (cmp::Operator::LT, cmp::Operator::GT)
-            | (cmp::Operator::LT, cmp::Operator::GTE)
-            | (cmp::Operator::LTE, cmp::Operator::GT)
-            | (cmp::Operator::LTE, cmp::Operator::GTE) => self.inner.row_ids_cmp_range_order(
-                (&left.0, ord_from_op(&left.1)),
-                (&right.0, ord_from_op(&right.1)),
-                dst,
-            ),
-
-            (a, b) => panic!("unsupported operators provided: ({:?}, {:?})", a, b),
-        }
+        self.inner.row_ids_filter_range(left, right, dst)
     }
 }
 
