@@ -125,6 +125,26 @@ where
     pub fn push_additional(&mut self, v: Option<P>, additional: u32) {
         self.physical.push_additional(v, additional)
     }
+
+    #[cfg(test)]
+    fn check_row_ids_ordered(&self, row_ids: &[u32]) -> bool {
+        self.physical.check_row_ids_ordered(row_ids)
+    }
+
+    #[cfg(test)]
+    fn all_non_null_row_ids(&self, dst: RowIDs) -> RowIDs {
+        self.physical.all_non_null_row_ids(dst)
+    }
+
+    #[cfg(test)]
+    fn push_additional_some(&mut self, v: P, additional: u32) {
+        self.physical.push_additional_some(v, additional)
+    }
+
+    #[cfg(test)]
+    fn push_additional_none(&mut self, additional: u32) {
+        self.physical.push_additional_none(additional)
+    }
 }
 
 impl<P> RLEPhysical<P>
@@ -736,7 +756,7 @@ mod test {
 
         for (input, exp_rl) in cases {
             let enc = RLE::new_from_iter(input.iter().cloned(), NoOpTranscoder {});
-            assert_eq!(enc.run_lengths, exp_rl);
+            assert_eq!(enc.physical.run_lengths, exp_rl);
         }
     }
 
@@ -762,7 +782,7 @@ mod test {
 
         for (input, exp_rl) in cases {
             let enc = RLE::new_from_iter_opt(input.iter().cloned(), NoOpTranscoder {});
-            assert_eq!(enc.run_lengths, exp_rl);
+            assert_eq!(enc.physical.run_lengths, exp_rl);
         }
     }
 
@@ -779,7 +799,7 @@ mod test {
         enc.push(22);
 
         assert_eq!(
-            enc.run_lengths,
+            enc.physical.run_lengths,
             vec![
                 (3, Some(45)),
                 (1, Some(-1)),
@@ -831,7 +851,7 @@ mod test {
 
         // check allocated buffer size
         let (mut enc, _) = new_encoding(vec![]);
-        enc.run_lengths.reserve_exact(40);
+        enc.physical.run_lengths.reserve_exact(40);
         // 40b Self + (40 rl * 24) = 1000b
         assert_eq!(enc.size(true), 1000);
 

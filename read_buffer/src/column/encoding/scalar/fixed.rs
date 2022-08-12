@@ -498,7 +498,7 @@ where
 mod test {
     use std::sync::Arc;
 
-    use super::super::transcoders::{MockTranscoder, NoOpTranscoder};
+    use super::super::transcoders::MockTranscoder;
     use super::cmp::Operator;
     use super::*;
 
@@ -519,7 +519,7 @@ mod test {
 
         // check pre-allocated sizing
         let (mut v, _) = new_encoding(vec![]);
-        v.values.reserve_exact(40);
+        v.physical.values.reserve_exact(40);
         // Self if 32 bytes and there are 40 * 8b values allocated
         assert_eq!(v.size(true), 352);
     }
@@ -582,24 +582,24 @@ mod test {
     }
 
     #[test]
-    fn ord_from_op() {
+    fn test_ord_from_op() {
         assert_eq!(
-            Fixed::<i64, i64, NoOpTranscoder>::ord_from_op(&cmp::Operator::LT),
+            ord_from_op(&cmp::Operator::LT),
             (Ordering::Less, Ordering::Less)
         );
 
         assert_eq!(
-            Fixed::<i64, i64, NoOpTranscoder>::ord_from_op(&cmp::Operator::GT),
+            ord_from_op(&cmp::Operator::GT),
             (Ordering::Greater, Ordering::Greater)
         );
 
         assert_eq!(
-            Fixed::<i64, i64, NoOpTranscoder>::ord_from_op(&cmp::Operator::LTE),
+            ord_from_op(&cmp::Operator::LTE),
             (Ordering::Less, Ordering::Equal)
         );
 
         assert_eq!(
-            Fixed::<i64, i64, NoOpTranscoder>::ord_from_op(&cmp::Operator::GTE),
+            ord_from_op(&cmp::Operator::GTE),
             (Ordering::Greater, Ordering::Equal)
         );
     }

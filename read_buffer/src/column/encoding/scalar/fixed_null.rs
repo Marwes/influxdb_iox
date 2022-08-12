@@ -81,6 +81,11 @@ where
             _marker: Default::default(),
         }
     }
+
+    #[cfg(test)]
+    fn all_non_null_row_ids(&self, dst: RowIDs) -> RowIDs {
+        self.physical.all_non_null_row_ids(dst)
+    }
 }
 
 // Helper function to convert comparison operators to cmp orderings.
