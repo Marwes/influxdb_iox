@@ -152,7 +152,7 @@ where
     P: Copy + Debug + PartialOrd + Send + Sync,
 {
     fn new_from_iter_opt(mut data: impl Iterator<Item = Option<P>>) -> Self {
-        let mut enc = RLEPhysical {
+        let mut enc = Self {
             run_lengths: vec![],
             null_count: 0,
             num_rows: 0,
@@ -266,9 +266,9 @@ where
 
         match op {
             cmp::Operator::GT | cmp::Operator::GTE | cmp::Operator::LT | cmp::Operator::LTE => {
-                self.row_ids_cmp(value, &op, dst)
+                self.row_ids_cmp(value, op, dst)
             }
-            _ => self.row_ids_cmp_equal(value, &op, dst),
+            _ => self.row_ids_cmp_equal(value, op, dst),
         }
     }
 

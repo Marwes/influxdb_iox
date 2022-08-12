@@ -267,7 +267,7 @@ where
             cmp::Operator::GTE => self.row_ids_cmp_order(&value, PartialOrd::ge, dst),
             cmp::Operator::LT => self.row_ids_cmp_order(&value, PartialOrd::lt, dst),
             cmp::Operator::LTE => self.row_ids_cmp_order(&value, PartialOrd::le, dst),
-            _ => self.row_ids_equal(&value, &op, dst),
+            _ => self.row_ids_equal(&value, op, dst),
         }
     }
 

@@ -327,11 +327,11 @@ where
         debug!(value=?value, operator=?op, encoding=?ENCODING_NAME, "row_ids_filter encoded expr");
 
         match op {
-            cmp::Operator::GT => self.row_ids_cmp_order(value, ord_from_op(&op), dst),
-            cmp::Operator::GTE => self.row_ids_cmp_order(value, ord_from_op(&op), dst),
-            cmp::Operator::LT => self.row_ids_cmp_order(value, ord_from_op(&op), dst),
-            cmp::Operator::LTE => self.row_ids_cmp_order(value, ord_from_op(&op), dst),
-            _ => self.row_ids_equal(value, &op, dst),
+            cmp::Operator::GT => self.row_ids_cmp_order(value, ord_from_op(op), dst),
+            cmp::Operator::GTE => self.row_ids_cmp_order(value, ord_from_op(op), dst),
+            cmp::Operator::LT => self.row_ids_cmp_order(value, ord_from_op(op), dst),
+            cmp::Operator::LTE => self.row_ids_cmp_order(value, ord_from_op(op), dst),
+            _ => self.row_ids_equal(value, op, dst),
         }
     }
 
